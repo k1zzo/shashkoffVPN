@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SHASHKOFFVPN User</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI", Tahoma, sans-serif;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #f2f5fb;
+        color: #1f2937;
+      }
+
+      .card {
+        width: min(520px, 92vw);
+        background: #fff;
+        border-radius: 14px;
+        padding: 24px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+      }
+
+      h1 {
+        margin: 0 0 16px;
+        font-size: 1.35rem;
+      }
+
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 8px 0;
+        border-bottom: 1px solid #edf0f7;
+      }
+
+      .row:last-child {
+        border-bottom: 0;
+      }
+
+      .label {
+        color: #6b7280;
+      }
+
+      .warning-banner {
+        margin-top: 14px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #fff4e5;
+        border: 1px solid #f7d7a8;
+        color: #92400e;
+      }
+
+      .warning-banner p {
+        margin: 0;
+        font-size: 0.93rem;
+      }
+
+      .warning-list {
+        margin: 8px 0 0;
+        padding-left: 18px;
+      }
+
+      .server-status {
+        margin-top: 16px;
+      }
+
+      .server-status h2 {
+        margin: 0 0 10px;
+        font-size: 1.05rem;
+      }
+
+      .devices {
+        margin-top: 18px;
+      }
+
+      .devices h2 {
+        margin: 0 0 10px;
+        font-size: 1.05rem;
+      }
+
+      .device-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 8px;
+      }
+
+      .device-item {
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #f7f9fc;
+      }
+
+      .device-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .device-meta {
+        margin-top: 4px;
+        font-size: 0.9rem;
+        color: #6b7280;
+      }
+
+      .muted {
+        margin: 0;
+        color: #6b7280;
+      }
+
+      .actions {
+        margin-top: 16px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .open-link {
+        display: inline-block;
+        text-decoration: none;
+        padding: 10px 14px;
+        border-radius: 10px;
+        background: #1363df;
+        color: #fff;
+        font-weight: 600;
+      }
+
+      .open-link-secondary {
+        background: #1f2937;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>SHASHKOFFVPN Profile</h1>
+      <div class="row">
+        <span class="label">Username</span>
+        <strong>{{ profile.username }}</strong>
+      </div>
+      <div class="row">
+        <span class="label">Status</span>
+        <strong>{{ profile.status }}</strong>
+      </div>
+      <div class="row">
+        <span class="label">Expire date</span>
+        <strong>{{ profile.expires_at }}</strong>
+      </div>
+      <div class="row">
+        <span class="label">Used devices</span>
+        <strong>{{ profile.devices_used }}</strong>
+      </div>
+      <div class="row">
+        <span class="label">Max devices</span>
+        <strong>{{ profile.max_devices }}</strong>
+      </div>
+
+      {% if server_status.config_incomplete %}
+      <div class="warning-banner">
+        <p>Server profile config is incomplete. Update VPN environment variables before production use.</p>
+        {% if server_status.config_warnings %}
+        <ul class="warning-list">
+          {% for warning in server_status.config_warnings %}
+          <li>{{ warning }}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if not server_status.app_base_url_configured %}
+      <div class="warning-banner">
+        <p>APP_BASE_URL is not configured. Set it for stable external links behind a reverse proxy.</p>
+      </div>
+      {% endif %}
+
+      <section class="server-status">
+        <h2>Server profile status</h2>
+        <div class="row">
+          <span class="label">VPN server</span>
+          <strong>{{ server_status.vpn_server }}</strong>
+        </div>
+        <div class="row">
+          <span class="label">SNI</span>
+          <strong>{{ server_status.vpn_sni }}</strong>
+        </div>
+        <div class="row">
+          <span class="label">Transport</span>
+          <strong>{{ server_status.vpn_transport }}</strong>
+        </div>
+        <div class="row">
+          <span class="label">Public base URL</span>
+          <strong>{{ server_status.app_base_url }}</strong>
+        </div>
+      </section>
+
+      <section class="devices">
+        <h2>Registered devices</h2>
+        {% if devices %}
+        <ul class="device-list">
+          {% for device in devices %}
+          <li class="device-item">
+            <div class="device-top">
+              <strong>{{ device.device_name }}</strong>
+              <span>{{ device.platform }}</span>
+            </div>
+            <p class="device-meta">Last seen: {{ device.last_seen_at }}</p>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted">No devices registered yet.</p>
+        {% endif %}
+      </section>
+
+      <div class="actions">
+        <a
+          class="open-link"
+          data-open-in-happ
+          data-open-base="{{ open_base_url }}"
+          data-open-mode="download"
+          href="/open/{{ profile.public_token }}?device_id=web-static&mode=download"
+        >
+          Open in Happ
+        </a>
+        <a
+          class="open-link open-link-secondary"
+          data-open-in-happ
+          data-open-base="{{ open_base_url }}"
+          href="/open/{{ profile.public_token }}?device_id=web-static"
+        >
+          Open helper page
+        </a>
+      </div>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

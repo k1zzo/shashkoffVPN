@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_project_path(raw_path: str) -> Path:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
+
+
+def _normalize_sqlite_url(value: str) -> str:
+    prefix = "sqlite:///"
+    if value.startswith(prefix):
+        return f"{prefix}{_resolve_project_path(value.removeprefix(prefix))}"
+    return f"{prefix}{_resolve_project_path(value)}"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _normalize_base_url(value: str) -> str:
+    raw = value.strip().rstrip("/")
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return f"https://{raw}"
+
+
+def _parse_trusted_hosts(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ("*",)
+
+    hosts = tuple(part.strip() for part in value.split(",") if part.strip())
+    return hosts or ("*",)
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    if not normalized:
+        return True
+    placeholder_fragments = [
+        "change_me",
+        "replace_with",
+        "example",
+        "placeholder",
+        "your_",
+        "your-",
+    ]
+    return any(fragment in normalized for fragment in placeholder_fragments)
+
+
+def _build_vpn_config_warnings(
+    *,
+    vpn_server: str,
+    vpn_port: int,
+    vpn_sni: str,
+    vpn_reality_public_key: str,
+    vpn_reality_short_id: str,
+    vpn_transport: str,
+) -> list[str]:
+    warnings: list[str] = []
+
+    if _looks_like_placeholder(vpn_server):
+        warnings.append("VPN_SERVER looks like a placeholder value.")
+    if vpn_port <= 0 or vpn_port > 65535:
+        warnings.append("VPN_PORT is outside the valid TCP/UDP port range.")
+    if _looks_like_placeholder(vpn_sni):
+        warnings.append("VPN_SNI looks like a placeholder value.")
+    if _looks_like_placeholder(vpn_reality_public_key):
+        warnings.append("VPN_REALITY_PUBLIC_KEY looks like a placeholder value.")
+    if _looks_like_placeholder(vpn_reality_short_id):
+        warnings.append("VPN_REALITY_SHORT_ID looks like a placeholder value.")
+    if vpn_transport.strip().lower() != "tcp":
+        warnings.append("VPN_TRANSPORT is not tcp. The profile generator will use tcp.")
+
+    return warnings
+
+
+@dataclass(frozen=True)
+class Settings:
+    app_name: str
+    environment: str
+    database_url: str
+    templates_dir: Path
+    static_dir: Path
+    app_base_url: str
+    app_base_url_configured: bool
+    app_trusted_hosts: tuple[str, ...]
+    vpn_server: str
+    vpn_port: int
+    vpn_reality_public_key: str
+    vpn_reality_short_id: str
+    vpn_sni: str
+    vpn_transport: str
+    vpn_profile_name_prefix: str
+    vpn_config_warnings: tuple[str, ...]
+    vpn_config_incomplete: bool
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        default_db_path = os.getenv("DATABASE_PATH", "data/app.db")
+        database_url = os.getenv("DATABASE_URL", _normalize_sqlite_url(default_db_path))
+
+        if not database_url.startswith("sqlite:///"):
+            raise ValueError("Only sqlite:/// URLs are supported in this MVP.")
+
+        templates_dir = _resolve_project_path(os.getenv("TEMPLATES_DIR", "templates"))
+        static_dir = _resolve_project_path(os.getenv("STATIC_DIR", "static"))
+        app_base_url = _normalize_base_url(os.getenv("APP_BASE_URL", ""))
+        app_trusted_hosts = _parse_trusted_hosts(os.getenv("APP_TRUSTED_HOSTS", "*"))
+        vpn_server = os.getenv("VPN_SERVER", "your-vpn-host.example.com")
+        vpn_port = _env_int("VPN_PORT", 443)
+        vpn_sni = os.getenv("VPN_SNI", "your-sni.example.com")
+        vpn_reality_public_key = os.getenv(
+            "VPN_REALITY_PUBLIC_KEY",
+            "CHANGE_ME_REALITY_PUBLIC_KEY",
+        )
+        vpn_reality_short_id = os.getenv(
+            "VPN_REALITY_SHORT_ID",
+            "CHANGE_ME_SHORT_ID",
+        )
+        vpn_transport = os.getenv("VPN_TRANSPORT", "tcp")
+        vpn_profile_name_prefix = os.getenv("VPN_PROFILE_NAME_PREFIX", "SHASHKOFFVPN")
+
+        vpn_config_warnings = _build_vpn_config_warnings(
+            vpn_server=vpn_server,
+            vpn_port=vpn_port,
+            vpn_sni=vpn_sni,
+            vpn_reality_public_key=vpn_reality_public_key,
+            vpn_reality_short_id=vpn_reality_short_id,
+            vpn_transport=vpn_transport,
+        )
+
+        return cls(
+            app_name=os.getenv("APP_NAME", "SHASHKOFFVPN"),
+            environment=os.getenv("APP_ENV", "development"),
+            database_url=database_url,
+            templates_dir=templates_dir,
+            static_dir=static_dir,
+            app_base_url=app_base_url,
+            app_base_url_configured=bool(app_base_url),
+            app_trusted_hosts=app_trusted_hosts,
+            vpn_server=vpn_server,
+            vpn_port=vpn_port,
+            vpn_reality_public_key=vpn_reality_public_key,
+            vpn_reality_short_id=vpn_reality_short_id,
+            vpn_sni=vpn_sni,
+            vpn_transport=vpn_transport,
+            vpn_profile_name_prefix=vpn_profile_name_prefix,
+            vpn_config_warnings=tuple(vpn_config_warnings),
+            vpn_config_incomplete=bool(vpn_config_warnings),
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings.from_env()

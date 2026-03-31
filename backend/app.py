@@ -1,0 +1,35 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from backend.config import get_settings
+from backend.db import init_db
+from backend.routes.devices import router as devices_router
+from backend.routes.health import router as health_router
+from backend.routes.profile import router as profile_router
+from backend.routes.user_page import router as user_page_router
+from backend.seed import seed_data
+
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    seed_data()
+    app.state.templates = Jinja2Templates(directory=str(settings.templates_dir))
+    yield
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.app_trusted_hosts))
+app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
+app.include_router(health_router)
+app.include_router(devices_router)
+app.include_router(profile_router)
+app.include_router(user_page_router)

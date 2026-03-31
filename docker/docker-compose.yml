@@ -1,0 +1,13 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: shashkoffvpn-app
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+    restart: unless-stopped
