@@ -5,11 +5,18 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.db import get_db
-from backend.models import Device, User
+from backend.models import Device
+from backend.queries import (
+    count_active_devices,
+    deactivate_device,
+    get_active_device,
+    get_device,
+    get_user_by_token,
+    is_user_accessible,
+)
 
 router = APIRouter(tags=["devices"])
 
@@ -19,6 +26,11 @@ class DeviceRegistrationRequest(BaseModel):
     device_id: str
     device_name: str
     platform: str
+
+
+class DeviceRemoveRequest(BaseModel):
+    token: str
+    device_id: str
 
 
 @router.post("/api/device/register")
@@ -43,20 +55,15 @@ def register_device(
     if not platform:
         return JSONResponse(status_code=400, content={"detail": "platform is required"})
 
-    user = db.scalar(select(User).where(User.public_token == token))
+    user = get_user_by_token(db, token)
     if user is None:
         return JSONResponse(status_code=404, content={"detail": "User not found"})
 
-    if not user.is_active:
+    if not is_user_accessible(user):
         return JSONResponse(status_code=403, content={"detail": "User is inactive"})
 
     now = datetime.utcnow()
-    existing_device = db.scalar(
-        select(Device).where(
-            Device.user_id == user.id,
-            Device.device_id == device_id,
-        )
-    )
+    existing_device = get_device(db, user.id, device_id)
     if existing_device is not None:
         existing_device.device_name = device_name
         existing_device.platform = platform
@@ -71,13 +78,7 @@ def register_device(
             }
         )
 
-    active_device_count = db.scalar(
-        select(func.count(Device.id)).where(
-            Device.user_id == user.id,
-            Device.is_active.is_(True),
-        )
-    )
-    if (active_device_count or 0) >= user.max_devices:
+    if count_active_devices(db, user.id) >= user.max_devices:
         return JSONResponse(
             status_code=403,
             content={"detail": "device limit reached"},
@@ -101,5 +102,46 @@ def register_device(
             "detail": "device registered",
             "device_id": device_id,
             "status": "created",
+        }
+    )
+
+
+# NOTE: device removal is intentionally allowed for inactive/expired users.
+# This is a cleanup operation — blocking it would prevent users from managing
+# their devices before resubscribing. Only user existence is validated.
+
+@router.post("/api/device/remove")
+def remove_device(
+    payload: DeviceRemoveRequest,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    token = payload.token.strip()
+    device_id = payload.device_id.strip()
+
+    if not token:
+        return JSONResponse(status_code=400, content={"detail": "token is required"})
+
+    if not device_id:
+        return JSONResponse(status_code=400, content={"detail": "device_id is required"})
+
+    user = get_user_by_token(db, token)
+    if user is None:
+        return JSONResponse(status_code=404, content={"detail": "User not found"})
+
+    device = get_active_device(db, user.id, device_id)
+    if device is None:
+        return JSONResponse(status_code=404, content={"detail": "Device not found"})
+
+    deactivate_device(db, device)
+
+    active_device_count = count_active_devices(db, user.id)
+
+    return JSONResponse(
+        content={
+            "detail": "device removed",
+            "device_id": device_id,
+            "status": "deactivated",
+            "active_devices": active_device_count or 0,
+            "max_devices": user.max_devices,
         }
     )

@@ -1,244 +1,161 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SHASHKOFFVPN User</title>
-    <style>
-      :root {
-        color-scheme: light;
-        font-family: "Segoe UI", Tahoma, sans-serif;
-      }
+<html lang="ru">
 
-      body {
-        margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        background: #f2f5fb;
-        color: #1f2937;
-      }
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SHASHKOFF VPN</title>
+  <link rel="stylesheet" href="/static/css/user_page.css">
+</head>
 
-      .card {
-        width: min(520px, 92vw);
-        background: #fff;
-        border-radius: 14px;
-        padding: 24px;
-        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
-      }
-
-      h1 {
-        margin: 0 0 16px;
-        font-size: 1.35rem;
-      }
-
-      .row {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        padding: 8px 0;
-        border-bottom: 1px solid #edf0f7;
-      }
-
-      .row:last-child {
-        border-bottom: 0;
-      }
-
-      .label {
-        color: #6b7280;
-      }
-
-      .warning-banner {
-        margin-top: 14px;
-        padding: 10px 12px;
-        border-radius: 10px;
-        background: #fff4e5;
-        border: 1px solid #f7d7a8;
-        color: #92400e;
-      }
-
-      .warning-banner p {
-        margin: 0;
-        font-size: 0.93rem;
-      }
-
-      .warning-list {
-        margin: 8px 0 0;
-        padding-left: 18px;
-      }
-
-      .server-status {
-        margin-top: 16px;
-      }
-
-      .server-status h2 {
-        margin: 0 0 10px;
-        font-size: 1.05rem;
-      }
-
-      .devices {
-        margin-top: 18px;
-      }
-
-      .devices h2 {
-        margin: 0 0 10px;
-        font-size: 1.05rem;
-      }
-
-      .device-list {
-        list-style: none;
-        padding: 0;
-        margin: 0;
-        display: grid;
-        gap: 8px;
-      }
-
-      .device-item {
-        padding: 10px 12px;
-        border-radius: 10px;
-        background: #f7f9fc;
-      }
-
-      .device-top {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-      }
-
-      .device-meta {
-        margin-top: 4px;
-        font-size: 0.9rem;
-        color: #6b7280;
-      }
-
-      .muted {
-        margin: 0;
-        color: #6b7280;
-      }
-
-      .actions {
-        margin-top: 16px;
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-
-      .open-link {
-        display: inline-block;
-        text-decoration: none;
-        padding: 10px 14px;
-        border-radius: 10px;
-        background: #1363df;
-        color: #fff;
-        font-weight: 600;
-      }
-
-      .open-link-secondary {
-        background: #1f2937;
-      }
-    </style>
-  </head>
-  <body>
-    <main class="card">
-      <h1>SHASHKOFFVPN Profile</h1>
-      <div class="row">
-        <span class="label">Username</span>
-        <strong>{{ profile.username }}</strong>
-      </div>
-      <div class="row">
-        <span class="label">Status</span>
-        <strong>{{ profile.status }}</strong>
-      </div>
-      <div class="row">
-        <span class="label">Expire date</span>
-        <strong>{{ profile.expires_at }}</strong>
-      </div>
-      <div class="row">
-        <span class="label">Used devices</span>
-        <strong>{{ profile.devices_used }}</strong>
-      </div>
-      <div class="row">
-        <span class="label">Max devices</span>
-        <strong>{{ profile.max_devices }}</strong>
-      </div>
-
-      {% if server_status.config_incomplete %}
-      <div class="warning-banner">
-        <p>Server profile config is incomplete. Update VPN environment variables before production use.</p>
-        {% if server_status.config_warnings %}
-        <ul class="warning-list">
-          {% for warning in server_status.config_warnings %}
-          <li>{{ warning }}</li>
-          {% endfor %}
-        </ul>
-        {% endif %}
-      </div>
-      {% endif %}
-      {% if not server_status.app_base_url_configured %}
-      <div class="warning-banner">
-        <p>APP_BASE_URL is not configured. Set it for stable external links behind a reverse proxy.</p>
-      </div>
-      {% endif %}
-
-      <section class="server-status">
-        <h2>Server profile status</h2>
-        <div class="row">
-          <span class="label">VPN server</span>
-          <strong>{{ server_status.vpn_server }}</strong>
+<body>
+  {% if profile.max_devices and profile.max_devices > 0 %}
+  {% set ring_ratio = profile.devices_used / profile.max_devices %}
+  {% else %}
+  {% set ring_ratio = 0 %}
+  {% endif %}
+  {% if ring_ratio > 1 %}
+  {% set ring_ratio = 1 %}
+  {% endif %}
+  {% if ring_ratio < 0 %} {% set ring_ratio=0 %} {% endif %} {% set ring_offset=402 - (402 * ring_ratio) %} <div
+    class="app-wrapper">
+    <div class="header">
+      <div class="brand">
+        <img class="brand-logo" src="/static/images/logo.png" alt="SHASHKOFF VPN logo">
+        <div class="brand-text">
+          <h1 class="brand-title">SHASHKOFF VPN</h1>
+          <p class="brand-subtitle">Персональный кабинет подписки</p>
         </div>
-        <div class="row">
-          <span class="label">SNI</span>
-          <strong>{{ server_status.vpn_sni }}</strong>
-        </div>
-        <div class="row">
-          <span class="label">Transport</span>
-          <strong>{{ server_status.vpn_transport }}</strong>
-        </div>
-        <div class="row">
-          <span class="label">Public base URL</span>
-          <strong>{{ server_status.app_base_url }}</strong>
-        </div>
-      </section>
+      </div>
+    </div>
 
-      <section class="devices">
-        <h2>Registered devices</h2>
-        {% if devices %}
-        <ul class="device-list">
-          {% for device in devices %}
-          <li class="device-item">
-            <div class="device-top">
-              <strong>{{ device.device_name }}</strong>
-              <span>{{ device.platform }}</span>
+    <div class="dashboard-panel" data-user-token="{{ profile.public_token }}"
+      data-max-devices="{{ profile.max_devices }}">
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">Имя пользователя</span>
+          <span class="stat-value">{{ profile.username }}</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Статус</span>
+          <span
+            class="stat-value status-value {% if profile.status == 'active' %}is-active{% else %}is-inactive{% endif %}">
+            <span
+              class="status-indicator {% if profile.status == 'active' %}is-active{% else %}is-inactive{% endif %}"></span>
+            {% if profile.status == 'active' %}Активна{% else %}Неактивна{% endif %}
+          </span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Истекает</span>
+          <span class="stat-value">{{ profile.expires_at }}</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Трафик</span>
+          <span class="stat-value">{{ profile.traffic_summary }}</span>
+        </div>
+      </div>
+
+      <div class="subscription-card">
+        <div class="sub-title">Подписка</div>
+
+        <div class="progress-container">
+          <svg class="progress-ring" viewBox="0 0 144 144">
+            <circle class="progress-ring-bg" cx="72" cy="72" r="64"></circle>
+            <circle class="progress-ring-value" cx="72" cy="72" r="64"
+              style="--ring-offset: {{ ring_offset|round(2) }};" data-device-ring></circle>
+          </svg>
+          <div class="progress-text" data-devices-counter>{{ profile.devices_used }}/{{ profile.max_devices }}</div>
+        </div>
+
+        <div class="sub-devices-info" data-devices-summary>УСТРОЙСТВА {{ profile.devices_used }}/{{ profile.max_devices
+          }}</div>
+
+        <div class="buttons-row">
+          <button class="btn" type="button" data-action-add-subscription data-happ-link="{{ actions.happ_deep_link }}"
+            data-subscription-url="{{ actions.subscription_url }}" data-default-label="Добавить в подписку"
+            data-loading-label="Открываем Happ..."
+            {% if not profile.accessible %}disabled{% endif %}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="4" />
+              <line x1="12" y1="8" x2="12" y2="16" />
+              <line x1="8" y1="12" x2="16" y2="12" />
+            </svg>
+            <span data-add-label>Добавить в подписку</span>
+          </button>
+          <button class="btn" type="button" data-action-copy-subscription
+            data-subscription-url="{{ actions.subscription_url }}" data-default-label="Скопировать ссылку"
+            data-success-label="Ссылка скопирована" data-error-label="Не удалось скопировать"
+            {% if not profile.accessible %}disabled{% endif %}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+            </svg>
+            <span data-copy-label>Скопировать ссылку</span>
+          </button>
+        </div>
+      </div>
+
+      <details class="devices-section{% if not devices %} devices-section-empty{% endif %}" data-devices-section open>
+        <summary class="devices-header">
+          <svg class="devices-caret" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M7 10l5 5 5-5z" />
+          </svg>
+          Подключенные устройства
+        </summary>
+        <div class="devices-content">
+          <div class="devices-list" data-devices-list>
+            {% for device in devices %}
+            {% set platform_lower = (device.platform or '')|lower %}
+            {% set name_lower = (device.device_name or '')|lower %}
+            {% if 'firefox' in platform_lower or 'firefox' in name_lower %}
+            {% set icon_src = 'https://upload.wikimedia.org/wikipedia/commons/a/a0/Firefox_logo%2C_2019.svg' %}
+            {% set icon_alt = 'Firefox' %}
+            {% elif 'safari' in platform_lower or 'safari' in name_lower %}
+            {% set icon_src = 'https://upload.wikimedia.org/wikipedia/commons/5/52/Safari_browser_logo.svg' %}
+            {% set icon_alt = 'Safari' %}
+            {% elif 'chrome' in platform_lower or 'chrome' in name_lower or 'web' in platform_lower %}
+            {% set icon_src =
+            'https://upload.wikimedia.org/wikipedia/commons/e/e1/Google_Chrome_icon_%28February_2022%29.svg' %}
+            {% set icon_alt = 'Chrome' %}
+            {% else %}
+            {% set icon_src = 'https://upload.wikimedia.org/wikipedia/commons/8/87/Desktop_computer_font_awesome.svg' %}
+            {% set icon_alt = 'Устройство' %}
+            {% endif %}
+            <div class="device-item" data-device-row data-device-id="{{ device.device_id }}">
+              <div class="device-main">
+                <img class="device-icon" src="{{ icon_src }}" alt="{{ icon_alt }}">
+                <div class="device-info">
+                  <span class="device-name">{{ device.device_name }}</span>
+                  <span class="device-activity">Последняя активность: {{ device.last_seen_at }}</span>
+                </div>
+              </div>
+              <button type="button" class="device-remove-btn" data-action-remove-device
+                data-device-id="{{ device.device_id }}" aria-label="Удалить устройство {{ device.device_name }}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"></path>
+                  <path d="M19 6l-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6"></path>
+                  <line x1="10" y1="11" x2="10" y2="17"></line>
+                  <line x1="14" y1="11" x2="14" y2="17"></line>
+                </svg>
+              </button>
             </div>
-            <p class="device-meta">Last seen: {{ device.last_seen_at }}</p>
-          </li>
-          {% endfor %}
-        </ul>
-        {% else %}
-        <p class="muted">No devices registered yet.</p>
-        {% endif %}
-      </section>
+            {% endfor %}
+          </div>
+          {% if not devices %}
+          <div class="device-empty" data-device-empty>Пока нет подключенных устройств</div>
+          {% endif %}
+        </div>
+      </details>
 
-      <div class="actions">
-        <a
-          class="open-link"
-          data-open-in-happ
-          data-open-base="{{ open_base_url }}"
-          data-open-mode="download"
-          href="/open/{{ profile.public_token }}?device_id=web-static&mode=download"
-        >
-          Open in Happ
-        </a>
-        <a
-          class="open-link open-link-secondary"
-          data-open-in-happ
-          data-open-base="{{ open_base_url }}"
-          href="/open/{{ profile.public_token }}?device_id=web-static"
-        >
-          Open helper page
-        </a>
-      </div>
-    </main>
+    </div>
+    </div>
     <script src="/static/app.js" defer></script>
-  </body>
+
+</body>
+
 </html>

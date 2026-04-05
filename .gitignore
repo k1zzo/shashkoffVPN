@@ -5,3 +5,5 @@ __pycache__/
 data/app.db
 data/*.db
 .DS_Store
+CLAUDE.md
+tests/
