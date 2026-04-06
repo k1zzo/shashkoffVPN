@@ -30,19 +30,17 @@ settings = get_settings()
 # InstallID, etc.) that could support server-side registration.
 #
 # Gated by: DEBUG_HAPP_SUB_REQUESTS=true in .env
-# Log target: logger named "happ.sub.diag" (INFO level)
+# Log target: root logger at WARNING level — guaranteed visible in Docker/uvicorn
 # Grep for: [HAPP-DIAG]
 #
 # To enable on the server:
-#   echo "DEBUG_HAPP_SUB_REQUESTS=true" >> .env && systemctl restart shashkoffvpn
-#   (or restart your Docker container / uvicorn process)
+#   Add DEBUG_HAPP_SUB_REQUESTS=true to .env and restart the container.
+#   docker compose logs -f | grep HAPP-DIAG
 #
 # To remove later: delete this block and the _log_happ_sub_request() call in
 # happ_subscription(). Also remove debug_happ_sub_requests from config.py and
 # .env.example.
 # ─────────────────────────────────────────────────────────────────────────────
-
-_happ_diag_logger = logging.getLogger("happ.sub.diag")
 
 # Headers that may contain secrets — redact their values in diagnostics logs.
 _REDACTED_HEADER_NAMES: frozenset[str] = frozenset({
@@ -58,11 +56,10 @@ _REDACTED_HEADER_NAMES: frozenset[str] = frozenset({
 
 
 def _log_happ_sub_request(request: Request, token: str) -> None:
-    """TEMP: Emit a structured diagnostics log for an incoming /sub/{token} request.
+    """TEMP: Emit diagnostics for an incoming /sub/{token} request via root logger WARNING.
 
-    Logs the client IP, full path, raw query string, parsed query parameters,
-    and all request headers (with sensitive names redacted). The token is
-    truncated to its first 8 characters to avoid leaking it verbatim.
+    Uses logging.warning() (root logger) so output is guaranteed to appear in
+    Docker/uvicorn stdout regardless of how named loggers are configured.
 
     Call this only when settings.debug_happ_sub_requests is True.
     """
@@ -84,20 +81,14 @@ def _log_happ_sub_request(request: Request, token: str) -> None:
     for name, value in request.headers.items():
         sanitized_headers[name] = "[REDACTED]" if name.lower() in _REDACTED_HEADER_NAMES else value
 
-    # One-line summary — easy to grep in production logs.
-    _happ_diag_logger.info(
+    # One-line summary — easy to grep in Docker logs.
+    logging.warning(
         "[HAPP-DIAG] token=%s ip=%s path=%s qs=%s",
         safe_token, client_ip, request.url.path, raw_query,
     )
     # Structured detail block.
-    _happ_diag_logger.info(
-        "[HAPP-DIAG] query_params=%s",
-        json.dumps(parsed_params, ensure_ascii=False),
-    )
-    _happ_diag_logger.info(
-        "[HAPP-DIAG] headers=%s",
-        json.dumps(sanitized_headers, ensure_ascii=False),
-    )
+    logging.warning("[HAPP-DIAG] query_params=%s", json.dumps(parsed_params, ensure_ascii=False))
+    logging.warning("[HAPP-DIAG] headers=%s", json.dumps(sanitized_headers, ensure_ascii=False))
 
 # ── END TEMP: HAPP REQUEST INSPECTION ────────────────────────────────────────
 
