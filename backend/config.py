@@ -110,6 +110,20 @@ class Settings:
     vpn_profile_name_prefix: str
     vpn_config_warnings: tuple[str, ...]
     vpn_config_incomplete: bool
+    # ── Happ Limited Links (optional) ────────────────────────────────────────
+    # When happ_limited_links_enabled is True and provider_code + auth_key are
+    # set, the user cabinet will request a Happ-side install_code and wrap the
+    # subscription URL in ?InstallID=<code> for the "Добавить в подписку" action.
+    # See backend/happ_limited_links.py for full documentation and assumptions.
+    happ_limited_links_enabled: bool
+    happ_provider_code: str
+    happ_auth_key: str
+    happ_api_url: str  # override base URL; defaults to https://happ-proxy.com
+    # ── Temporary diagnostics ─────────────────────────────────────────────────
+    # When debug_happ_sub_requests is True, /sub/{token} logs full request
+    # metadata (headers, query params, IP) to the "happ.sub.diag" logger.
+    # Set DEBUG_HAPP_SUB_REQUESTS=true in .env to enable. Remove after analysis.
+    debug_happ_sub_requests: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -146,6 +160,12 @@ class Settings:
             vpn_transport=vpn_transport,
         )
 
+        happ_enabled_raw = os.getenv("HAPP_LIMITED_LINKS_ENABLED", "").strip().lower()
+        happ_limited_links_enabled = happ_enabled_raw in ("1", "true", "yes")
+
+        debug_raw = os.getenv("DEBUG_HAPP_SUB_REQUESTS", "").strip().lower()
+        debug_happ_sub_requests = debug_raw in ("1", "true", "yes")
+
         return cls(
             app_name=os.getenv("APP_NAME", "SHASHKOFFVPN"),
             environment=os.getenv("APP_ENV", "development"),
@@ -164,6 +184,11 @@ class Settings:
             vpn_profile_name_prefix=vpn_profile_name_prefix,
             vpn_config_warnings=tuple(vpn_config_warnings),
             vpn_config_incomplete=bool(vpn_config_warnings),
+            happ_limited_links_enabled=happ_limited_links_enabled,
+            happ_provider_code=os.getenv("HAPP_PROVIDER_CODE", ""),
+            happ_auth_key=os.getenv("HAPP_AUTH_KEY", ""),
+            happ_api_url=os.getenv("HAPP_API_URL", ""),
+            debug_happ_sub_requests=debug_happ_sub_requests,
         )
 
 

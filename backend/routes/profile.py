@@ -1,6 +1,7 @@
 from datetime import datetime
 from base64 import b64encode
 import json
+import logging
 import re
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -22,6 +23,83 @@ from backend.url_utils import build_app_url
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
+
+# ── TEMP: HAPP REQUEST INSPECTION ────────────────────────────────────────────
+# Purpose: observe what Happ actually sends on subscription import/refresh so
+# we can determine whether it includes a stable per-device identifier (HWID,
+# InstallID, etc.) that could support server-side registration.
+#
+# Gated by: DEBUG_HAPP_SUB_REQUESTS=true in .env
+# Log target: logger named "happ.sub.diag" (INFO level)
+# Grep for: [HAPP-DIAG]
+#
+# To enable on the server:
+#   echo "DEBUG_HAPP_SUB_REQUESTS=true" >> .env && systemctl restart shashkoffvpn
+#   (or restart your Docker container / uvicorn process)
+#
+# To remove later: delete this block and the _log_happ_sub_request() call in
+# happ_subscription(). Also remove debug_happ_sub_requests from config.py and
+# .env.example.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_happ_diag_logger = logging.getLogger("happ.sub.diag")
+
+# Headers that may contain secrets — redact their values in diagnostics logs.
+_REDACTED_HEADER_NAMES: frozenset[str] = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth",
+    "x-auth-token",
+    "x-secret",
+})
+
+
+def _log_happ_sub_request(request: Request, token: str) -> None:
+    """TEMP: Emit a structured diagnostics log for an incoming /sub/{token} request.
+
+    Logs the client IP, full path, raw query string, parsed query parameters,
+    and all request headers (with sensitive names redacted). The token is
+    truncated to its first 8 characters to avoid leaking it verbatim.
+
+    Call this only when settings.debug_happ_sub_requests is True.
+    """
+    safe_token = f"{token[:8]}..." if len(token) > 8 else token
+
+    # Client IP: trust X-Forwarded-For when running behind a reverse proxy.
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    elif request.client:
+        client_ip = request.client.host
+    else:
+        client_ip = "unknown"
+
+    raw_query = str(request.url.query) or "(none)"
+    parsed_params = dict(request.query_params)
+
+    sanitized_headers: dict[str, str] = {}
+    for name, value in request.headers.items():
+        sanitized_headers[name] = "[REDACTED]" if name.lower() in _REDACTED_HEADER_NAMES else value
+
+    # One-line summary — easy to grep in production logs.
+    _happ_diag_logger.info(
+        "[HAPP-DIAG] token=%s ip=%s path=%s qs=%s",
+        safe_token, client_ip, request.url.path, raw_query,
+    )
+    # Structured detail block.
+    _happ_diag_logger.info(
+        "[HAPP-DIAG] query_params=%s",
+        json.dumps(parsed_params, ensure_ascii=False),
+    )
+    _happ_diag_logger.info(
+        "[HAPP-DIAG] headers=%s",
+        json.dumps(sanitized_headers, ensure_ascii=False),
+    )
+
+# ── END TEMP: HAPP REQUEST INSPECTION ────────────────────────────────────────
 
 # Stable far-future timestamp used when a user has no expires_at (unlimited plan).
 # 2099-12-31 00:00:00 UTC — avoids a sliding "now + 30 days" that changes on every request.
@@ -289,6 +367,11 @@ def happ_subscription(
     token: str,
     db: Session = Depends(get_db),
 ) -> Response:
+    # TEMP: emit diagnostics before any processing so we capture even invalid
+    # or unauthenticated requests (useful to see what Happ actually sends).
+    if settings.debug_happ_sub_requests:
+        _log_happ_sub_request(request, token)
+
     clean_token = token.strip()
     if not clean_token:
         return Response("not found", status_code=404)
@@ -335,9 +418,9 @@ def happ_subscription(
 
     # ── Happ HWID device-cap headers ─────────────────────────────────────
     #
-    # These four headers together request the "local HWID enforcement" model:
+    # These three headers request the "local HWID enforcement" model:
     # Happ tracks hardware IDs inside the app, refuses the (N+1)th unique
-    # device, and never calls back to our server for validation.
+    # device, and does not need a server callback to validate.
     #
     #   x-hwid-active: true
     #       Enables HWID tracking for this subscription.
@@ -346,17 +429,20 @@ def happ_subscription(
     #       The maximum number of distinct HWIDs Happ should allow.
     #       Must be a number — the previous value "true" was likely ignored.
     #
-    #   x-hwid-not-supported: true
-    #       INFERENCE (not confirmed from Happ docs): means "this provider has
-    #       no server-side HWID validation API". Happ should enforce the cap
-    #       locally without making a server callback. Do NOT interpret this as
-    #       "disable HWID" — if that were the intent the other HWID headers
-    #       would be pointless. This interpretation must be verified with a
-    #       real 6-device test before treating enforcement as guaranteed.
-    #
     #   subscription-always-hwid-enable: 1
-    #       Forces Happ to use HWID tracking even when the provider has no
-    #       server HWID API (i.e., when x-hwid-not-supported is true).
+    #       Forces Happ to use HWID tracking even when no server HWID API
+    #       is present. This is the intended signal for "enforce locally."
+    #
+    # NOTE: x-hwid-not-supported was removed. Its plain meaning ("HWID is
+    #   not supported") directly contradicts x-hwid-active: true. A real-
+    #   device test (max_devices=1, two devices) confirmed that the full
+    #   4-header combo did NOT block the second device. The most likely
+    #   cause: x-hwid-not-supported overrides the active headers and
+    #   disables HWID enforcement entirely. subscription-always-hwid-enable
+    #   already covers the "no server callback — enforce locally" intent
+    #   and is the unambiguous replacement.
+    #   STILL UNKNOWN: whether removing it fixes enforcement. Requires a
+    #   real 2-device test (limit=1) to confirm.
     #
     #   providerid: 6QlMYR5q
     #       Identifies this provider to Happ. UNKNOWN whether this ID is
@@ -405,7 +491,6 @@ def happ_subscription(
         "announce": f"base64:{announce}",
         "x-hwid-active": "true",
         "x-hwid-limit": str(user.max_devices),
-        "x-hwid-not-supported": "true",
         "x-robots-tag": "noindex, nofollow, noarchive, nosnippet, noimageindex",
         "cache-control": "no-store",
         "routing": _build_happ_routing_link(),

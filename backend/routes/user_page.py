@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
+from backend import happ_limited_links
 from backend.config import get_settings
 from backend.db import get_db
 from backend.queries import (
@@ -65,7 +66,38 @@ def render_user_page(
         request=request,
         settings=settings,
     )
-    happ_deep_link = build_happ_deep_link(subscription_url)
+
+    # ── Happ Limited Links (optional) ────────────────────────────────────────
+    # When enabled, request a Happ-side install_code and build a limited
+    # subscription URL (/sub/{token}?InstallID=...).  The "Добавить в подписку"
+    # deep link wraps this limited URL so Happ enforces the install cap
+    # server-side on happ-proxy.com.
+    #
+    # The copy button always uses the raw subscription_url — it must stay
+    # stable across page loads and be importable without Happ infrastructure.
+    #
+    # If the feature is disabled, or the API call fails, or the user is
+    # inaccessible, the plain subscription URL / deep link is used unchanged.
+    #
+    # NOTE: a new install_code is requested on every page render.  Whether old
+    # codes accumulate or expire on happ-proxy.com is UNKNOWN.  Add per-user
+    # caching once API behaviour is confirmed.
+    if accessible and happ_limited_links.is_enabled(settings):
+        install_code = happ_limited_links.get_limited_install_code(
+            subscription_url=subscription_url,
+            max_devices=user.max_devices,
+            settings=settings,
+        )
+        if install_code:
+            limited_url = happ_limited_links.build_limited_subscription_url(
+                subscription_url=subscription_url,
+                install_code=install_code,
+            )
+            happ_deep_link = build_happ_deep_link(limited_url)
+        else:
+            happ_deep_link = build_happ_deep_link(subscription_url)
+    else:
+        happ_deep_link = build_happ_deep_link(subscription_url)
 
     expires_at_label = user.expires_at.strftime(
         "%d.%m.%Y") if user.expires_at else "Never"
