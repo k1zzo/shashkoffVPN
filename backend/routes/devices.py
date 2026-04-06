@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from backend.config import get_settings
 from backend.db import get_db
 from backend.models import Device
 from backend.queries import (
@@ -17,6 +19,9 @@ from backend.queries import (
     get_user_by_token,
     is_user_accessible,
 )
+from backend.xray_clients import apply_xray_client_changes
+
+settings = get_settings()
 
 router = APIRouter(tags=["devices"])
 
@@ -69,7 +74,14 @@ def register_device(
         existing_device.platform = platform
         existing_device.last_seen_at = now
         existing_device.is_active = True
+        # Backfill device_uuid for legacy rows that pre-date this field.
+        uuid_backfilled = False
+        if existing_device.device_uuid is None:
+            existing_device.device_uuid = str(uuid4())
+            uuid_backfilled = True
         db.commit()
+        if uuid_backfilled:
+            apply_xray_client_changes(db, settings)
         return JSONResponse(
             content={
                 "detail": "device already registered",
@@ -90,12 +102,14 @@ def register_device(
             device_id=device_id,
             device_name=device_name,
             platform=platform,
+            device_uuid=str(uuid4()),
             first_seen_at=now,
             last_seen_at=now,
             is_active=True,
         )
     )
     db.commit()
+    apply_xray_client_changes(db, settings)
 
     return JSONResponse(
         content={
@@ -133,6 +147,11 @@ def remove_device(
         return JSONResponse(status_code=404, content={"detail": "Device not found"})
 
     deactivate_device(db, device)
+    # Rebuild Xray clients config to exclude this device's UUID.
+    # After Xray is reloaded, the device_uuid is no longer accepted → real VPN
+    # access revocation. Without Xray reload the config file is correct but the
+    # running Xray process still holds the old client set in memory.
+    apply_xray_client_changes(db, settings)
 
     active_device_count = count_active_devices(db, user.id)
 

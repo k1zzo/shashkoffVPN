@@ -119,6 +119,26 @@ class Settings:
     happ_provider_code: str
     happ_auth_key: str
     happ_api_url: str  # override base URL; defaults to https://happ-proxy.com
+    # ── Xray server-side clients config ──────────────────────────────────────
+    # When set, the path where the active Xray clients JSON array is written
+    # whenever the device set changes. The file contains only the `clients`
+    # array for an Xray VLESS inbound — not a full Xray config.
+    # Set XRAY_CLIENTS_CONFIG_PATH=/etc/xray/clients.json (or similar).
+    # If unset, no file is written and per-device Xray revocation is incomplete.
+    xray_clients_config_path: Path | None
+    # When set, the app runs this command after each successful clients config
+    # write so the running Xray process picks up the new client set. The command
+    # is parsed via shlex.split and executed without shell=True.
+    # Examples:
+    #   XRAY_RELOAD_COMMAND=systemctl reload xray
+    #   XRAY_RELOAD_COMMAND=docker kill --signal=SIGHUP xray
+    #   XRAY_RELOAD_COMMAND=/opt/scripts/apply-xray-clients.sh
+    # If unset, config is written but Xray is NOT reloaded automatically —
+    # a WARNING is logged and manual reload is required.
+    xray_reload_command: str | None
+    # Seconds to wait for the reload command before giving up (default: 10).
+    # Increase if your reload script is slow; decrease for faster failure detection.
+    xray_reload_timeout: int
     # ── Temporary diagnostics ─────────────────────────────────────────────────
     # When debug_happ_sub_requests is True, /sub/{token} logs full request
     # metadata (headers, query params, IP) to the "happ.sub.diag" logger.
@@ -166,6 +186,15 @@ class Settings:
         debug_raw = os.getenv("DEBUG_HAPP_SUB_REQUESTS", "").strip().lower()
         debug_happ_sub_requests = debug_raw in ("1", "true", "yes")
 
+        xray_clients_path_raw = os.getenv("XRAY_CLIENTS_CONFIG_PATH", "").strip()
+        xray_clients_config_path = (
+            _resolve_project_path(xray_clients_path_raw) if xray_clients_path_raw else None
+        )
+
+        xray_reload_cmd_raw = os.getenv("XRAY_RELOAD_COMMAND", "").strip()
+        xray_reload_command = xray_reload_cmd_raw if xray_reload_cmd_raw else None
+        xray_reload_timeout = _env_int("XRAY_RELOAD_TIMEOUT_SECONDS", 10)
+
         return cls(
             app_name=os.getenv("APP_NAME", "SHASHKOFFVPN"),
             environment=os.getenv("APP_ENV", "development"),
@@ -189,6 +218,9 @@ class Settings:
             happ_auth_key=os.getenv("HAPP_AUTH_KEY", ""),
             happ_api_url=os.getenv("HAPP_API_URL", ""),
             debug_happ_sub_requests=debug_happ_sub_requests,
+            xray_clients_config_path=xray_clients_config_path,
+            xray_reload_command=xray_reload_command,
+            xray_reload_timeout=xray_reload_timeout,
         )
 
 

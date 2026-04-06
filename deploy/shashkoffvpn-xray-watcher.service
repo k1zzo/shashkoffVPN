@@ -1,0 +1,24 @@
+# shashkoffvpn-xray-watcher.service — systemd service unit
+#
+# Triggered by shashkoffvpn-xray-watcher.path when the clients file changes.
+# Runs shashkoffvpn-reload-xray, which merges, validates, and reloads Xray.
+#
+# Type=oneshot means systemd waits for the script to finish and captures
+# its exit code. If the script fails (validation error, reload error),
+# the failure is recorded in the journal — check with:
+#   journalctl -u shashkoffvpn-xray-watcher.service
+#
+# Installation: see shashkoffvpn-xray-watcher.path
+
+[Unit]
+Description=Reload Xray when ShashkoffVPN client config changes
+After=xray.service
+Requires=xray.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/shashkoffvpn-reload-xray
+StandardOutput=journal
+StandardError=journal
+# Prevent flood of reloads if the file is written many times quickly.
+# The path unit coalesces events within this window.

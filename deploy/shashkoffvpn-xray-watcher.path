@@ -1,0 +1,40 @@
+# shashkoffvpn-xray-watcher.path — systemd path unit for Docker deployments
+#
+# Watches the ShashkoffVPN clients fragment for changes and triggers the
+# Xray reload service automatically.
+#
+# This is the recommended reload mechanism for Docker deployments where
+# the app container cannot call systemctl on the host directly.
+#
+# How it works:
+#   1. The app (in Docker) writes xray-clients.json to the shared data volume.
+#   2. systemd detects the file change via inotify.
+#   3. This unit activates shashkoffvpn-xray-watcher.service.
+#   4. That service runs shashkoffvpn-reload-xray, which merges + validates + reloads.
+#
+# Installation:
+#   sudo cp deploy/shashkoffvpn-xray-watcher.path /etc/systemd/system/
+#   sudo cp deploy/shashkoffvpn-xray-watcher.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now shashkoffvpn-xray-watcher.path
+#
+# Verify it is active:
+#   systemctl status shashkoffvpn-xray-watcher.path
+#
+# Watch reload events in real time:
+#   journalctl -u shashkoffvpn-xray-watcher.service -f
+#
+# Adjust PathModified to match your actual deployment path if different.
+
+[Unit]
+Description=Watch ShashkoffVPN Xray clients config for changes
+Documentation=https://github.com/yourorg/shashkoffvpn
+
+[Path]
+# This must match XRAY_CLIENTS_CONFIG_PATH in .env (host-side path).
+# Default Docker deployment: app writes to /app/data/ inside the container,
+# which maps to /opt/shashkoffvpn/data/ on the host.
+PathModified=/opt/shashkoffvpn/data/xray-clients.json
+
+[Install]
+WantedBy=multi-user.target

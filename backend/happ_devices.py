@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import uuid4
 
 from fastapi import Request
 from sqlalchemy import select
@@ -146,11 +147,22 @@ def register_or_update_happ_device(
     is responsible for checking count_active_devices < user.max_devices
     before calling this function for new devices (is_new=True path).
 
+    device_uuid lifecycle:
+      New device       → a fresh UUID4 is generated and persisted.
+      Existing device  → device_uuid is preserved. If the row predates
+                         this field (device_uuid is NULL), a UUID4 is
+                         assigned now (legacy backfill). UUIDs are never
+                         rotated on normal refresh — the same hardware
+                         always gets the same credential.
+      Reactivation     → same policy: reuse existing device_uuid so the
+                         device can reconnect immediately without needing
+                         a new subscription import. Only generate if NULL.
+
     Reactivation: if a device was previously deactivated (is_active=False)
     and reconnects with the same HWID, it is reactivated. Deactivation from
-    the cabinet frees a DB slot, but if the same hardware reconnects the
-    device is recognised and reactivated. This is intentional — full
-    permanent blocking at the Xray layer is not yet implemented.
+    the cabinet frees a DB slot; if the same hardware reconnects the device
+    is recognised and reactivated. Full Xray-layer blocking requires removing
+    the device_uuid from the Xray config on deactivation (handled by caller).
     """
     existing = db.scalar(
         select(Device).where(
@@ -169,6 +181,10 @@ def register_or_update_happ_device(
         existing.device_type = device_type
         existing.last_seen_at = now
         existing.is_active = True
+        # Backfill device_uuid for legacy rows that pre-date this field.
+        # Never rotate an existing UUID — stable credential for active devices.
+        if existing.device_uuid is None:
+            existing.device_uuid = str(uuid4())
         db.commit()
         return existing, False
 
@@ -179,6 +195,7 @@ def register_or_update_happ_device(
         platform=platform,
         device_type=device_type,
         source="happ",
+        device_uuid=str(uuid4()),
         first_seen_at=now,
         last_seen_at=now,
         is_active=True,

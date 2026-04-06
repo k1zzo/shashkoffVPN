@@ -3,6 +3,7 @@ from base64 import b64encode
 import json
 import logging
 import re
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -21,6 +22,7 @@ from backend.queries import (
 )
 from backend.subscription_utils import build_subscription_url, build_vless_url
 from backend.url_utils import build_app_url
+from backend.xray_clients import apply_xray_client_changes
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
@@ -105,8 +107,18 @@ def _error_response(status_code: int, detail: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"detail": detail})
 
 
-def _build_real_subscription_body(user: User) -> str:
-    return build_vless_url(user_uuid=user.uuid, username=user.username, settings=settings)
+def _build_real_subscription_body(user: User, *, vless_uuid: str | None = None) -> str:
+    """Build the VLESS URL for a subscription response.
+
+    vless_uuid: the UUID to embed in the VLESS URL.
+      - Pass device.device_uuid for Happ requests (per-device credential).
+      - Pass None to fall back to user.uuid (legacy / no x-hwid path).
+
+    The fallback to user.uuid is a transitional behavior. It keeps existing
+    non-Happ clients working while Happ clients migrate to per-device UUIDs.
+    """
+    effective_uuid = vless_uuid if vless_uuid else user.uuid
+    return build_vless_url(user_uuid=effective_uuid, username=user.username, settings=settings)
 
 
 def _build_happ_routing_payload() -> dict:
@@ -220,27 +232,37 @@ def _build_profile_payload(
         if count_active_devices(db, user.id) >= user.max_devices:
             return None, None, _error_response(403, "device limit reached")
 
-        db.add(
-            Device(
-                user_id=user.id,
-                device_id=clean_device_id,
-                device_name=f"Web Device {clean_device_id[-6:]}",
-                platform="web",
-                first_seen_at=now,
-                last_seen_at=now,
-                is_active=True,
-            )
+        new_device = Device(
+            user_id=user.id,
+            device_id=clean_device_id,
+            device_name=f"Web Device {clean_device_id[-6:]}",
+            platform="web",
+            device_uuid=str(uuid4()),
+            first_seen_at=now,
+            last_seen_at=now,
+            is_active=True,
         )
+        db.add(new_device)
         db.commit()
+        active_device = new_device
+        apply_xray_client_changes(db, settings)
     else:
+        if existing_device.device_uuid is None:
+            existing_device.device_uuid = str(uuid4())
+            apply_xray_client_changes(db, settings)
         existing_device.last_seen_at = now
         existing_device.is_active = True
         db.commit()
+        active_device = existing_device
 
     active_devices = count_active_devices(db, user.id)
 
+    # Use this device's own UUID in the profile. Falls back to user.uuid only
+    # if device_uuid is somehow still null (should not occur after above logic).
+    effective_uuid = active_device.device_uuid if active_device.device_uuid else user.uuid
+
     profile = build_vpn_profile(
-        user_uuid=user.uuid,
+        user_uuid=effective_uuid,
         username=user.username,
         settings=settings,
     )
@@ -435,12 +457,20 @@ def build_happ_subscription_response(
     #
     # Note: count_active_devices is queried BEFORE registration so the check
     # correctly reflects the current state without the candidate device.
+    happ_device: Device | None = None
     device_info = extract_happ_device_info(request)
     if device_info is not None:
-        existing = get_device(db, user.id, device_info.hwid)
-        if existing is None and count_active_devices(db, user.id) >= user.max_devices:
+        pre_existing = get_device(db, user.id, device_info.hwid)
+        had_no_uuid = pre_existing is not None and pre_existing.device_uuid is None
+        if pre_existing is None and count_active_devices(db, user.id) >= user.max_devices:
             return _happ_device_limit_response(user)
-        register_or_update_happ_device(db, user.id, device_info, datetime.utcnow())
+        happ_device, is_new = register_or_update_happ_device(
+            db, user.id, device_info, datetime.utcnow()
+        )
+        # Refresh Xray clients when a new device is added or a legacy device
+        # just received its first device_uuid (backfill).
+        if is_new or had_no_uuid:
+            apply_xray_client_changes(db, settings)
     # ─────────────────────────────────────────────────────────────────────────
 
     profile_title = b64encode(
@@ -542,7 +572,18 @@ def build_happ_subscription_response(
         "routing": _build_happ_routing_link(),
     }
 
-    body = _build_real_subscription_body(user)
+    # ── Per-device VLESS credential ───────────────────────────────────────────
+    #
+    # Use the device's own UUID in the subscription body so each Happ device
+    # connects with a unique VPN credential. Revoking that device_uuid from
+    # the Xray config terminates its VPN access independently of other devices.
+    #
+    # Fallback to user.uuid when x-hwid is absent (non-HWID Happ path, legacy
+    # /sub/{token} imports). This is a transitional behaviour — it keeps
+    # existing clients working while they re-import via the canonical link.
+    # See CLAUDE.md "Legacy/shared-UUID behavior" for the staged removal plan.
+    vless_uuid: str | None = happ_device.device_uuid if happ_device else None
+    body = _build_real_subscription_body(user, vless_uuid=vless_uuid)
 
     return Response(
         content=body,

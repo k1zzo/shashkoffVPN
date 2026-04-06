@@ -9,5 +9,8 @@ services:
     env_file:
       - ../.env
     volumes:
+      # SQLite DB + Xray clients fragment share this directory.
+      # Host path (when deployed to /opt/shashkoffvpn): /opt/shashkoffvpn/data/
+      # App writes xray-clients.json here; the host-side watcher reads it.
       - ../data:/app/data
     restart: unless-stopped

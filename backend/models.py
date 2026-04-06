@@ -48,6 +48,13 @@ class Device(Base):
     # "api"  = registered via POST /api/device/register
     # NULL   = registered before this field was added, or via /api/profile auto-register
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # device_uuid: per-device VPN credential (UUID4).
+    # This is the UUID issued in the VLESS URL for this specific device.
+    # Null for rows created before this field was added (legacy). Those rows
+    # receive a device_uuid on first refresh via register_or_update_happ_device.
+    # Deleting/deactivating a device excludes this UUID from the Xray active
+    # client set, providing real per-device VPN access revocation.
+    device_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )

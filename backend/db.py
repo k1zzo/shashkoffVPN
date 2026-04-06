@@ -45,8 +45,9 @@ def upgrade_db_schema() -> None:
     for databases created before a column was introduced.
 
     Columns added here:
-      devices.device_type — Happ device category (phone/tablet/pc/tv/unknown)
-      devices.source      — registration origin ("happ", "api", or NULL for legacy)
+      devices.device_type  — Happ device category (phone/tablet/pc/tv/unknown)
+      devices.source       — registration origin ("happ", "api", or NULL for legacy)
+      devices.device_uuid  — per-device VPN UUID (UUID4); NULL for legacy rows
     """
     with engine.connect() as conn:
         existing = {
@@ -58,6 +59,9 @@ def upgrade_db_schema() -> None:
             conn.commit()
         if "source" not in existing:
             conn.execute(text("ALTER TABLE devices ADD COLUMN source TEXT"))
+            conn.commit()
+        if "device_uuid" not in existing:
+            conn.execute(text("ALTER TABLE devices ADD COLUMN device_uuid TEXT"))
             conn.commit()
 
 
