@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from backend.config import get_settings
 from backend.config_generator import build_vpn_profile
 from backend.db import get_db
+from backend.happ_devices import extract_happ_device_info, register_or_update_happ_device
 from backend.models import Device, User
 from backend.queries import (
     count_active_devices,
@@ -295,10 +296,11 @@ def _json_or_download_response(
 # NOTE: /api/profile enforces device limits (requires device_id, auto-registers
 # devices, rejects when max_devices is reached). This is the per-device config
 # endpoint used by direct Xray clients. In the subscription-only flow, the Happ
-# client uses /sub/{token} instead, which intentionally does NOT enforce device
-# limits — Happ manages its own HWID-based device tracking via subscription
-# headers (x-hwid-limit, x-hwid-active). The two endpoints serve different
-# distribution models; this is by design, not an oversight.
+# client uses /{token} (the canonical personal link) which detects Happ requests
+# by their characteristic headers and returns the subscription response. Device
+# tracking is delegated to Happ via subscription headers (x-hwid-limit,
+# x-hwid-active, subscription-always-hwid-enable). The two code paths serve
+# different distribution models; this is by design, not an oversight.
 
 @router.get("/api/profile/{token}")
 def get_vpn_profile(
@@ -346,30 +348,62 @@ def open_profile(
     )
 
 
-# NOTE: /sub/{token} is the Happ-compatible subscription endpoint. It returns a
-# plain VLESS URL and does NOT enforce server-side device limits. Device tracking
-# is delegated to the Happ client via subscription headers (x-hwid-limit,
-# x-hwid-active, subscription-always-hwid-enable). This is intentional — see the
-# comment above /api/profile for the full rationale.
+def _happ_device_limit_response(user: "User") -> Response:
+    """Return a Happ-compatible blocked response when max_devices is exceeded.
 
-@router.get("/sub/{token}")
-def happ_subscription(
+    Only returned for newly seen HWIDs. Known active devices always refresh
+    successfully regardless of current device count.
+
+    Uses the same header shape as the inactive/expired blocked response so
+    Happ handles it consistently (empty body, human-readable profile-title).
+    """
+    profile_title = b64encode(
+        "ЛИМИТ УСТРОЙСТВ ДОСТИГНУТ".encode("utf-8")
+    ).decode("utf-8")
+    expire_ts = int(user.expires_at.timestamp()) if user.expires_at else _UNLIMITED_EXPIRE_TS
+    return Response(
+        content="",
+        media_type="text/plain",
+        headers={
+            "profile-title": f"base64:{profile_title}",
+            "subscription-userinfo": f"upload=0; download=0; total=0; expire={expire_ts}",
+            "profile-update-interval": _HAPP_UPDATE_INTERVAL_HOURS,
+            "cache-control": "no-store",
+            "x-robots-tag": "noindex, nofollow, noarchive, nosnippet, noimageindex",
+        },
+    )
+
+
+def build_happ_subscription_response(
+    user: "User",
     request: Request,
+    *,
     token: str,
-    db: Session = Depends(get_db),
+    db: Session,
 ) -> Response:
-    # TEMP: emit diagnostics before any processing so we capture even invalid
-    # or unauthenticated requests (useful to see what Happ actually sends).
+    """Build the Happ subscription response for an already-looked-up user.
+
+    This is the single shared implementation used by both /{token} (canonical)
+    and /sub/{token} (legacy compatibility alias). Both active and
+    blocked/expired users are handled here.
+
+    Device registration (when x-hwid is present):
+      - Known active device → update metadata + last_seen_at, serve subscription.
+      - Known inactive device → reactivate, update metadata, serve subscription.
+      - New device, under max_devices → register device, serve subscription.
+      - New device, at max_devices → return device-limit blocked response.
+      - No x-hwid → skip registration, serve subscription unchanged.
+
+    VPN access model: all devices for a user share the same per-user Xray UUID.
+    Device registration/deletion only affects DB state and cabinet display.
+    Deleting a device row does NOT yet revoke per-device Xray access — that
+    requires a per-device UUID model which is not yet implemented.
+    """
+    # TEMP: emit diagnostics when DEBUG_HAPP_SUB_REQUESTS=true.
+    # Fires for both /{token} and /sub/{token} since both call this function.
+    # Grep for [HAPP-DIAG] in container logs.
     if settings.debug_happ_sub_requests:
         _log_happ_sub_request(request, token)
-
-    clean_token = token.strip()
-    if not clean_token:
-        return Response("not found", status_code=404)
-
-    user = get_user_by_token(db, clean_token)
-    if user is None:
-        return Response("not found", status_code=404)
 
     if not is_user_accessible(user):
         expired = user.expires_at is not None and user.expires_at <= datetime.utcnow()
@@ -390,13 +424,34 @@ def happ_subscription(
             },
         )
 
+    # ── Server-side device registration from Happ headers ────────────────────
+    #
+    # Extract the hardware identifier Happ sends in every subscription request.
+    # If x-hwid is absent (legacy /sub/{token} imports, or non-Happ clients
+    # hitting this path) we skip registration — no fake device rows are created.
+    #
+    # For known devices: update metadata + last_seen_at, reactivate if needed.
+    # For new devices:   enforce max_devices before inserting.
+    #
+    # Note: count_active_devices is queried BEFORE registration so the check
+    # correctly reflects the current state without the candidate device.
+    device_info = extract_happ_device_info(request)
+    if device_info is not None:
+        existing = get_device(db, user.id, device_info.hwid)
+        if existing is None and count_active_devices(db, user.id) >= user.max_devices:
+            return _happ_device_limit_response(user)
+        register_or_update_happ_device(db, user.id, device_info, datetime.utcnow())
+    # ─────────────────────────────────────────────────────────────────────────
+
     profile_title = b64encode(
         f"SHASHKOFFVPN {user.username}".encode("utf-8")).decode("utf-8")
     announce = b64encode(
         "Subscription | SHASHKOFFVPN".encode("utf-8")).decode("utf-8")
     expire_ts = int(user.expires_at.timestamp()) if user.expires_at else _UNLIMITED_EXPIRE_TS
 
-    sub_url = build_subscription_url(
+    # /{token} is now the canonical personal link — both the web page and the
+    # subscription URL resolve to it (browser gets cabinet, Happ gets VLESS).
+    canonical_url = build_subscription_url(
         token=user.public_token,
         request=request,
         settings=settings,
@@ -464,7 +519,7 @@ def happ_subscription(
     #   - Device names and last_seen_at in the cabinet reflect DB state only
     #     (what the client told us at registration). They are not sourced from
     #     Happ and do not reflect actual connection activity for Happ users.
-    headers = {
+    resp_headers = {
         "Access-Control-Allow-Origin": "*",
         "Content-Disposition": f'attachment; filename="user_{user.id}_{user.public_token}"',
         "fallback-url": fallback_url,
@@ -473,7 +528,7 @@ def happ_subscription(
         "notification-subs-expire": "1",
         "profile-title": f"base64:{profile_title}",
         "profile-update-interval": _HAPP_UPDATE_INTERVAL_HOURS,
-        "profile-web-page-url": sub_url,
+        "profile-web-page-url": canonical_url,
         "providerid": "6QlMYR5q",
         "subscription-always-hwid-enable": "1",
         "subscription-userinfo": f"upload=0; download=0; total=0; expire={expire_ts}",
@@ -491,6 +546,34 @@ def happ_subscription(
 
     return Response(
         content=body,
-        headers=headers,
+        headers=resp_headers,
         media_type="text/plain",
     )
+
+
+# ── Legacy compatibility alias: /sub/{token} ─────────────────────────────────
+#
+# /{token} is the canonical personal link as of this change. Happ clients that
+# previously imported /sub/{token} continue to work via this alias so existing
+# installations do not break.
+#
+# The entire active product flow (cabinet buttons, deep links, copy URL) now
+# uses /{token}. /sub/{token} is NOT exposed in the UI or documentation for
+# new installations. It can be removed once all existing Happ clients have
+# re-imported via the canonical /{token} link.
+
+@router.get("/sub/{token}")
+def happ_subscription(
+    request: Request,
+    token: str,
+    db: Session = Depends(get_db),
+) -> Response:
+    clean_token = token.strip()
+    if not clean_token:
+        return Response("not found", status_code=404)
+
+    user = get_user_by_token(db, clean_token)
+    if user is None:
+        return Response("not found", status_code=404)
+
+    return build_happ_subscription_response(user, request, token=clean_token, db=db)

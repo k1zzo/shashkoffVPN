@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
 from backend import happ_limited_links
@@ -12,22 +12,24 @@ from backend.queries import (
     list_active_devices,
 )
 from backend.reserved import is_token_reserved
+from backend.routes.profile import build_happ_subscription_response
 from backend.subscription_utils import (
     build_happ_deep_link,
     build_subscription_url,
+    is_happ_request,
 )
 
 router = APIRouter(tags=["user-page"])
 settings = get_settings()
 
 
-@router.get("/{token}", response_class=HTMLResponse)
-@router.get("/u/{token}", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/{token}")
+@router.get("/u/{token}", include_in_schema=False)
 def render_user_page(
     request: Request,
     token: str,
     db: Session = Depends(get_db),
-) -> HTMLResponse:
+) -> Response:
     # Guard: reserved prefixes should never match a real user, but if the
     # catch-all somehow receives one (e.g. "health"), bail early so we don't
     # query for a nonsensical token.
@@ -49,6 +51,14 @@ def render_user_page(
             status_code=404,
         )
 
+    # /{token} is the single universal personal link.
+    # Happ subscription clients are identified by their characteristic headers
+    # (x-hwid, x-device-os, x-device-model, or user-agent: Happ/…) and served
+    # the subscription response. Normal browser requests fall through to the
+    # HTML cabinet below.
+    if is_happ_request(request):
+        return build_happ_subscription_response(user, request, token=token, db=db)
+
     accessible = is_user_accessible(user)
     if not accessible:
         if not user.is_active:
@@ -69,7 +79,7 @@ def render_user_page(
 
     # ── Happ Limited Links (optional) ────────────────────────────────────────
     # When enabled, request a Happ-side install_code and build a limited
-    # subscription URL (/sub/{token}?InstallID=...).  The "Добавить в подписку"
+    # subscription URL (/{token}?InstallID=...).  The "Добавить в подписку"
     # deep link wraps this limited URL so Happ enforces the install cap
     # server-side on happ-proxy.com.
     #

@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.config import get_settings
-from backend.db import init_db
+from backend.db import init_db, upgrade_db_schema
 from backend.routes.devices import router as devices_router
 from backend.routes.health import router as health_router
 from backend.routes.profile import router as profile_router
@@ -21,6 +21,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    upgrade_db_schema()
     seed_data()
     app.state.templates = Jinja2Templates(directory=str(settings.templates_dir))
     yield

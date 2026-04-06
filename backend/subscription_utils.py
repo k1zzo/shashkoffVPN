@@ -30,10 +30,39 @@ def build_subscription_url(
     request: Request,
     settings: Settings,
 ) -> str:
-    return build_app_url(path=f"/sub/{token}", request=request, settings=settings)
+    # /{token} is the canonical personal link — both browsers and Happ use it.
+    # /sub/{token} is kept only as a legacy compatibility alias.
+    return build_app_url(path=f"/{token}", request=request, settings=settings)
 
 
 def build_happ_deep_link(subscription_url: str) -> str:
     encoded = quote(subscription_url, safe="")
     return f"happ://add/{encoded}"
+
+
+def is_happ_request(request: Request) -> bool:
+    """Return True if the request comes from a Happ subscription client.
+
+    Detection uses any of the headers confirmed to be sent by Happ on
+    subscription import and refresh:
+
+      x-hwid          — device hardware ID sent by Happ
+      x-device-os     — OS identifier sent by Happ
+      x-device-model  — device model string sent by Happ
+      user-agent      — Happ sets this to "Happ/<version>"
+
+    OR logic: any single signal is sufficient. This handles cases where Happ
+    omits one header (e.g. first import before HWID is assigned). Detection
+    is used for server-side routing only; it does not affect response content.
+    """
+    headers = request.headers
+    if headers.get("x-hwid"):
+        return True
+    if headers.get("x-device-os"):
+        return True
+    if headers.get("x-device-model"):
+        return True
+    if headers.get("user-agent", "").lower().startswith("happ/"):
+        return True
+    return False
 

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.config import get_settings
@@ -32,6 +32,33 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+
+
+def upgrade_db_schema() -> None:
+    """Apply additive schema changes to existing tables.
+
+    Called after init_db() on every startup. Only safe, additive changes
+    (new nullable columns) belong here — never dropping or renaming.
+
+    SQLAlchemy's create_all uses CREATE TABLE IF NOT EXISTS, so it never
+    adds columns to tables that already exist. This function fills that gap
+    for databases created before a column was introduced.
+
+    Columns added here:
+      devices.device_type — Happ device category (phone/tablet/pc/tv/unknown)
+      devices.source      — registration origin ("happ", "api", or NULL for legacy)
+    """
+    with engine.connect() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(devices)")).fetchall()
+        }
+        if "device_type" not in existing:
+            conn.execute(text("ALTER TABLE devices ADD COLUMN device_type TEXT"))
+            conn.commit()
+        if "source" not in existing:
+            conn.execute(text("ALTER TABLE devices ADD COLUMN source TEXT"))
+            conn.commit()
 
 
 def get_db() -> Generator[Session, None, None]:

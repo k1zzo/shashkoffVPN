@@ -39,6 +39,15 @@ class Device(Base):
     device_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     device_name: Mapped[str] = mapped_column(String(120), nullable=False)
     platform: Mapped[str] = mapped_column(String(60), nullable=False)
+    # device_type: phone | tablet | pc | tv | unknown
+    # Derived from x-device-os / x-device-model on Happ registration.
+    # NULL for devices registered before this field was added or via /api/device/register.
+    device_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # source: "happ" | "api" | NULL (legacy / pre-field)
+    # "happ" = registered by a Happ subscription request via x-hwid
+    # "api"  = registered via POST /api/device/register
+    # NULL   = registered before this field was added, or via /api/profile auto-register
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
