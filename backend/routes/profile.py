@@ -1,5 +1,5 @@
-from datetime import datetime
 from base64 import b64encode
+from datetime import datetime
 import json
 import logging
 import re
@@ -26,6 +26,7 @@ from backend.xray_clients import apply_xray_client_changes
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 # ── TEMP: HAPP REQUEST INSPECTION ────────────────────────────────────────────
 # Purpose: observe what Happ actually sends on subscription import/refresh so
@@ -245,14 +246,30 @@ def _build_profile_payload(
         db.add(new_device)
         db.commit()
         active_device = new_device
+        logger.info(
+            "XRAY-APPLY: reason=new_device device_id=%.24s",
+            clean_device_id,
+        )
         apply_xray_client_changes(db, settings)
     else:
-        if existing_device.device_uuid is None:
+        # Snapshot mutable state BEFORE mutation so change flags are accurate.
+        was_inactive = not existing_device.is_active
+        uuid_backfilled = existing_device.device_uuid is None
+
+        if uuid_backfilled:
             existing_device.device_uuid = str(uuid4())
-            apply_xray_client_changes(db, settings)
         existing_device.last_seen_at = now
         existing_device.is_active = True
-        db.commit()
+        db.commit()  # commit before Xray update so the new UUID is visible
+
+        if uuid_backfilled or was_inactive:
+            reason = "uuid_backfilled" if uuid_backfilled else "reactivated"
+            logger.info(
+                "XRAY-APPLY: reason=%s device_id=%.24s",
+                reason, clean_device_id,
+            )
+            apply_xray_client_changes(db, settings)
+
         active_device = existing_device
 
     active_devices = count_active_devices(db, user.id)
@@ -460,9 +477,6 @@ def build_happ_subscription_response(
     device_info = extract_happ_device_info(request)
     if device_info is not None:
         pre_existing = get_device(db, user.id, device_info.hwid)
-        had_no_uuid = pre_existing is not None and pre_existing.device_uuid is None
-        # Snapshot inactive state before registration mutates the row.
-        was_inactive = pre_existing is not None and not pre_existing.is_active
 
         # Enforce limit strictly: only currently active devices refresh freely.
         # New devices (no row) and deleted/inactive devices must pass the check.
@@ -472,14 +486,18 @@ def build_happ_subscription_response(
         if not is_known_active and count_active_devices(db, user.id) >= user.max_devices:
             return _happ_device_limit_response(user)
 
-        happ_device, is_new = register_or_update_happ_device(
+        result = register_or_update_happ_device(
             db, user.id, device_info, datetime.utcnow()
         )
-        # Refresh Xray clients when:
-        # - a new device is added (is_new)
-        # - a legacy device got its first device_uuid (had_no_uuid / backfill)
-        # - a previously inactive device was reactivated (was_inactive)
-        if is_new or had_no_uuid or was_inactive:
+        happ_device = result.device
+        # Only reload Xray when the active client set actually changed.
+        # Plain refreshes (known active device, last_seen_at / metadata update)
+        # must NOT trigger apply_xray_client_changes — the reload is expensive.
+        if result.active_client_set_changed:
+            logger.info(
+                "XRAY-APPLY: reason=%s token=%.8s device_id=%.24s",
+                result.xray_change_reason(), token, device_info.hwid,
+            )
             apply_xray_client_changes(db, settings)
     # ─────────────────────────────────────────────────────────────────────────
 

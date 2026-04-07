@@ -9,10 +9,10 @@ Key invariants:
 - Device limit enforcement (max_devices) is the responsibility of the CALLER,
   not of register_or_update_happ_device(). The caller must check
   count_active_devices before calling this function for new devices.
-- VPN access model: all devices belonging to a user share the same per-user
-  Xray UUID. Registering or deleting a device row affects the cabinet DB state
-  only. It does NOT yet perform per-device Xray UUID revocation. This is an
-  explicit staged limitation — see the next-stage notes in CLAUDE.md.
+- register_or_update_happ_device() returns a HappRegistrationResult with
+  explicit boolean flags (created_new, reactivated, uuid_backfilled). Callers
+  MUST use result.active_client_set_changed to decide whether to call
+  apply_xray_client_changes() — never add implicit conditions in the caller.
 """
 
 from __future__ import annotations
@@ -26,6 +26,45 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.models import Device
+
+
+@dataclass(frozen=True)
+class HappRegistrationResult:
+    """Structured result from register_or_update_happ_device.
+
+    Contains the mutated device and explicit boolean flags for every change
+    that affects the Xray active client set.  Callers must use
+    active_client_set_changed to decide whether apply_xray_client_changes()
+    is needed — do NOT re-derive this from the raw flags in the caller.
+
+    Flags:
+      created_new      — a new Device row was inserted (new HWID first seen)
+      reactivated      — device was is_active=False, now set to True
+      uuid_backfilled  — device had device_uuid=None, now assigned a UUID4
+
+    Plain refreshes (known active device, already has UUID) set all flags to
+    False — apply_xray_client_changes() must NOT be called in that case.
+    """
+
+    device: Device
+    created_new: bool
+    reactivated: bool
+    uuid_backfilled: bool
+
+    @property
+    def active_client_set_changed(self) -> bool:
+        """True when the Xray active client list changed as a result."""
+        return self.created_new or self.reactivated or self.uuid_backfilled
+
+    def xray_change_reason(self) -> str | None:
+        """Human-readable reason string for logging, or None if no change."""
+        if self.created_new:
+            return "new_device"
+        if self.reactivated:
+            return "reactivated"
+        if self.uuid_backfilled:
+            return "uuid_backfilled"
+        return None
 
 
 @dataclass(frozen=True)
@@ -135,34 +174,26 @@ def register_or_update_happ_device(
     user_id: int,
     device_info: HappDeviceInfo,
     now: datetime,
-) -> tuple[Device, bool]:
+) -> HappRegistrationResult:
     """Upsert a device record from a Happ subscription request.
 
-    Returns (device, is_new):
-      is_new=True  — a new Device row was inserted and committed.
-      is_new=False — an existing device was found; metadata and
-                     last_seen_at were updated and committed.
+    Returns a HappRegistrationResult with explicit change flags.
+    Use result.active_client_set_changed to decide whether
+    apply_xray_client_changes() must be called — do NOT call it on plain
+    refreshes where only last_seen_at or metadata changed.
 
-    IMPORTANT: this function does NOT check max_devices. The caller
-    is responsible for checking count_active_devices < user.max_devices
-    before calling this function for new devices (is_new=True path).
+    IMPORTANT: this function does NOT check max_devices. The caller is
+    responsible for checking the limit before calling this function for
+    new or inactive devices.
 
     device_uuid lifecycle:
       New device       → a fresh UUID4 is generated and persisted.
       Existing device  → device_uuid is preserved. If the row predates
                          this field (device_uuid is NULL), a UUID4 is
                          assigned now (legacy backfill). UUIDs are never
-                         rotated on normal refresh — the same hardware
-                         always gets the same credential.
+                         rotated on normal refresh.
       Reactivation     → same policy: reuse existing device_uuid so the
-                         device can reconnect immediately without needing
-                         a new subscription import. Only generate if NULL.
-
-    Reactivation: if a device was previously deactivated (is_active=False)
-    and reconnects with the same HWID, it is reactivated. Deactivation from
-    the cabinet frees a DB slot; if the same hardware reconnects the device
-    is recognised and reactivated. Full Xray-layer blocking requires removing
-    the device_uuid from the Xray config on deactivation (handled by caller).
+                         device reconnects with the same credential.
     """
     existing = db.scalar(
         select(Device).where(
@@ -176,6 +207,10 @@ def register_or_update_happ_device(
     platform = device_info.os if device_info.os else "unknown"
 
     if existing is not None:
+        # Snapshot mutable state BEFORE mutation so the result flags are accurate.
+        reactivated = not existing.is_active
+        uuid_backfilled = existing.device_uuid is None
+
         existing.device_name = name
         existing.platform = platform
         existing.device_type = device_type
@@ -183,10 +218,15 @@ def register_or_update_happ_device(
         existing.is_active = True
         # Backfill device_uuid for legacy rows that pre-date this field.
         # Never rotate an existing UUID — stable credential for active devices.
-        if existing.device_uuid is None:
+        if uuid_backfilled:
             existing.device_uuid = str(uuid4())
         db.commit()
-        return existing, False
+        return HappRegistrationResult(
+            device=existing,
+            created_new=False,
+            reactivated=reactivated,
+            uuid_backfilled=uuid_backfilled,
+        )
 
     device = Device(
         user_id=user_id,
@@ -202,4 +242,9 @@ def register_or_update_happ_device(
     )
     db.add(device)
     db.commit()
-    return device, True
+    return HappRegistrationResult(
+        device=device,
+        created_new=True,
+        reactivated=False,
+        uuid_backfilled=False,
+    )

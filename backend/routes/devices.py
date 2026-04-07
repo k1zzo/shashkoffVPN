@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends
@@ -22,6 +23,7 @@ from backend.queries import (
 from backend.xray_clients import apply_xray_client_changes
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["devices"])
 
@@ -70,18 +72,29 @@ def register_device(
     now = datetime.utcnow()
     existing_device = get_device(db, user.id, device_id)
     if existing_device is not None:
+        # Snapshot mutable state BEFORE mutation so change flags are accurate.
+        was_inactive = not existing_device.is_active
+        uuid_backfilled = existing_device.device_uuid is None
+
         existing_device.device_name = device_name
         existing_device.platform = platform
         existing_device.last_seen_at = now
         existing_device.is_active = True
-        # Backfill device_uuid for legacy rows that pre-date this field.
-        uuid_backfilled = False
-        if existing_device.device_uuid is None:
-            existing_device.device_uuid = str(uuid4())
-            uuid_backfilled = True
-        db.commit()
         if uuid_backfilled:
+            existing_device.device_uuid = str(uuid4())
+        db.commit()
+
+        # Only reload Xray when the active client set actually changed.
+        # Metadata-only updates (name/platform/last_seen_at) on a known active
+        # device must NOT trigger apply_xray_client_changes.
+        if uuid_backfilled or was_inactive:
+            reason = "uuid_backfilled" if uuid_backfilled else "reactivated"
+            logger.info(
+                "XRAY-APPLY: reason=%s token=%.8s device_id=%.24s",
+                reason, token, device_id,
+            )
             apply_xray_client_changes(db, settings)
+
         return JSONResponse(
             content={
                 "detail": "device already registered",
@@ -109,6 +122,10 @@ def register_device(
         )
     )
     db.commit()
+    logger.info(
+        "XRAY-APPLY: reason=new_device token=%.8s device_id=%.24s",
+        token, device_id,
+    )
     apply_xray_client_changes(db, settings)
 
     return JSONResponse(
@@ -151,6 +168,10 @@ def remove_device(
     # After Xray is reloaded, the device_uuid is no longer accepted → real VPN
     # access revocation. Without Xray reload the config file is correct but the
     # running Xray process still holds the old client set in memory.
+    logger.info(
+        "XRAY-APPLY: reason=device_deleted token=%.8s device_id=%.24s",
+        token, device_id,
+    )
     apply_xray_client_changes(db, settings)
 
     active_device_count = count_active_devices(db, user.id)
