@@ -411,15 +411,14 @@ def build_happ_subscription_response(
 
     Device registration (when x-hwid is present):
       - Known active device → update metadata + last_seen_at, serve subscription.
-      - Known inactive device → reactivate, update metadata, serve subscription.
-      - New device, under max_devices → register device, serve subscription.
-      - New device, at max_devices → return device-limit blocked response.
+      - New device, under limit → register device, serve subscription.
+      - New device, at limit → return device-limit blocked response.
+      - Known inactive (deleted) device, under limit → reactivate, serve subscription.
+      - Known inactive (deleted) device, at limit → return device-limit blocked response.
       - No x-hwid → skip registration, serve subscription unchanged.
 
-    VPN access model: all devices for a user share the same per-user Xray UUID.
-    Device registration/deletion only affects DB state and cabinet display.
-    Deleting a device row does NOT yet revoke per-device Xray access — that
-    requires a per-device UUID model which is not yet implemented.
+    Limit enforcement: strictly covers both new and reactivating devices.
+    Only currently active devices refresh without a limit check.
     """
     # TEMP: emit diagnostics when DEBUG_HAPP_SUB_REQUESTS=true.
     # Fires for both /{token} and /sub/{token} since both call this function.
@@ -462,14 +461,25 @@ def build_happ_subscription_response(
     if device_info is not None:
         pre_existing = get_device(db, user.id, device_info.hwid)
         had_no_uuid = pre_existing is not None and pre_existing.device_uuid is None
-        if pre_existing is None and count_active_devices(db, user.id) >= user.max_devices:
+        # Snapshot inactive state before registration mutates the row.
+        was_inactive = pre_existing is not None and not pre_existing.is_active
+
+        # Enforce limit strictly: only currently active devices refresh freely.
+        # New devices (no row) and deleted/inactive devices must pass the check.
+        # This prevents a deleted device from silently reactivating and exceeding
+        # the device cap when another device has already claimed the slot.
+        is_known_active = pre_existing is not None and pre_existing.is_active
+        if not is_known_active and count_active_devices(db, user.id) >= user.max_devices:
             return _happ_device_limit_response(user)
+
         happ_device, is_new = register_or_update_happ_device(
             db, user.id, device_info, datetime.utcnow()
         )
-        # Refresh Xray clients when a new device is added or a legacy device
-        # just received its first device_uuid (backfill).
-        if is_new or had_no_uuid:
+        # Refresh Xray clients when:
+        # - a new device is added (is_new)
+        # - a legacy device got its first device_uuid (had_no_uuid / backfill)
+        # - a previously inactive device was reactivated (was_inactive)
+        if is_new or had_no_uuid or was_inactive:
             apply_xray_client_changes(db, settings)
     # ─────────────────────────────────────────────────────────────────────────
 

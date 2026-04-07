@@ -9,19 +9,10 @@ Per-device revocation model:
   Once Xray is reloaded (automatically, if XRAY_RELOAD_COMMAND is set),
   that UUID is no longer accepted → real VPN access revocation.
 
-Transitional state:
-  Two categories of entries are written:
-
-  1. Per-device entries (primary model):
-     Active devices with a non-null device_uuid. Happ clients receive
-     their device_uuid in the VLESS URL and connect using it. Deleting
-     a device removes its device_uuid from this list.
-
-  2. User-level fallback entries (transitional/legacy):
-     Each active user's user.uuid is also included. This covers:
-       - Non-Happ clients using /open/{token} or /api/profile.
-       - Legacy Happ installs still holding the old shared UUID.
-     Remove this block in a future pass once all clients have migrated.
+Only per-device entries are written. The former user-level (user.uuid)
+fallback has been removed so that VPN access is gated exclusively on
+active device_uuid entries. This closes the bypass where a user with all
+devices deleted could still connect using the shared user.uuid credential.
 
 Entry point:
   apply_xray_client_changes(db, settings) — the single function to call
@@ -62,16 +53,19 @@ def build_active_xray_clients(db: Session) -> list[dict]:
           }]
         }
 
-    Source of truth: active Device rows with device_uuid, plus user.uuid
-    for the transitional legacy path. Only users with is_active=True are
-    included; expired users (expires_at in the past) are NOT filtered here —
-    expiry is enforced at the subscription layer, not the Xray layer.
-    Filtering by expiry here would risk cutting off active sessions mid-use.
+    Source of truth: active Device rows with device_uuid only.
+    Only users with is_active=True are included; expired users are NOT
+    filtered here — expiry is enforced at the subscription layer, not the
+    Xray layer. Filtering by expiry here would risk cutting off active
+    sessions mid-use.
+
+    user.uuid is intentionally excluded. VPN access is gated exclusively
+    on per-device credentials so that deleting a device actually revokes
+    that device's access once Xray is reloaded.
     """
     clients: list[dict] = []
     seen_uuids: set[str] = set()
 
-    # ── 1. Per-device entries (primary, new model) ────────────────────────────
     device_rows = db.execute(
         select(Device, User)
         .join(User, Device.user_id == User.id)
@@ -84,31 +78,13 @@ def build_active_xray_clients(db: Session) -> list[dict]:
 
     for device, user in device_rows:
         if device.device_uuid in seen_uuids:
-            continue  # shouldn't happen, but guard against dupes
+            continue  # guard against dupes
         seen_uuids.add(device.device_uuid)
         # Truncate device_id to keep email labels readable in Xray logs.
         label = (device.device_id or "unknown")[:24]
         clients.append({
             "id": device.device_uuid,
             "email": f"{user.username}/{label}",
-            "flow": "xtls-rprx-vision",
-        })
-
-    # ── 2. User-level fallback entries (transitional, legacy) ─────────────────
-    # Include user.uuid for non-Happ clients and legacy Happ installs that
-    # still hold the old shared UUID. Remove this block in a future pass once
-    # all Happ clients have re-imported and user.uuid is safe to revoke.
-    user_rows = db.scalars(
-        select(User).where(User.is_active.is_(True))
-    ).all()
-
-    for user in user_rows:
-        if user.uuid in seen_uuids:
-            continue
-        seen_uuids.add(user.uuid)
-        clients.append({
-            "id": user.uuid,
-            "email": f"{user.username}/legacy",
             "flow": "xtls-rprx-vision",
         })
 
