@@ -133,14 +133,22 @@ class Settings:
     #   XRAY_RELOAD_COMMAND=systemctl reload xray
     #   XRAY_RELOAD_COMMAND=docker kill --signal=SIGHUP xray
     #   XRAY_RELOAD_COMMAND=/opt/scripts/apply-xray-clients.sh
-    # If unset, config is written but Xray is NOT reloaded automatically —
-    # a WARNING is logged and manual reload is required.
+    # If unset and xray_reload_via_watcher is False, a WARNING is logged.
+    # If unset and xray_reload_via_watcher is True, a low-noise INFO is logged
+    # instead — the host-side systemd watcher is expected to apply changes.
     xray_reload_command: str | None
     # Seconds to wait for the reload command before giving up (default: 10).
     # Increase if your reload script is slow; decrease for faster failure detection.
     xray_reload_timeout: int
+    # Set XRAY_RELOAD_VIA_WATCHER=true in Docker production deployments that use
+    # the host-side systemd inotify watcher to apply Xray client changes.
+    # When True and XRAY_RELOAD_COMMAND is unset, the missing-reload warning is
+    # suppressed — because the watcher is the intended reload mechanism.
+    # When False (default), the warning is kept to alert operators that changes
+    # are not being applied automatically.
+    xray_reload_via_watcher: bool
     # ── Temporary diagnostics ─────────────────────────────────────────────────
-    # When debug_happ_sub_requests is True, /sub/{token} logs full request
+    # When debug_happ_sub_requests is True, /{token} logs full request
     # metadata (headers, query params, IP) to the "happ.sub.diag" logger.
     # Set DEBUG_HAPP_SUB_REQUESTS=true in .env to enable. Remove after analysis.
     debug_happ_sub_requests: bool
@@ -195,6 +203,9 @@ class Settings:
         xray_reload_command = xray_reload_cmd_raw if xray_reload_cmd_raw else None
         xray_reload_timeout = _env_int("XRAY_RELOAD_TIMEOUT_SECONDS", 10)
 
+        watcher_raw = os.getenv("XRAY_RELOAD_VIA_WATCHER", "").strip().lower()
+        xray_reload_via_watcher = watcher_raw in ("1", "true", "yes")
+
         return cls(
             app_name=os.getenv("APP_NAME", "SHASHKOFFVPN"),
             environment=os.getenv("APP_ENV", "development"),
@@ -221,6 +232,7 @@ class Settings:
             xray_clients_config_path=xray_clients_config_path,
             xray_reload_command=xray_reload_command,
             xray_reload_timeout=xray_reload_timeout,
+            xray_reload_via_watcher=xray_reload_via_watcher,
         )
 
 

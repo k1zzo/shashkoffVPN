@@ -36,7 +36,8 @@ from backend.reserved import is_token_reserved
 
 
 def _generate_token() -> str:
-    return secrets.token_urlsafe(16)
+    # token_urlsafe(12) → exactly 16 URL-safe base64 characters
+    return secrets.token_urlsafe(12)
 
 
 def _generate_uuid() -> str:

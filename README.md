@@ -6,8 +6,8 @@ Subscription-only VPN service. Users connect through the Happ client — no manu
 
 1. Each user gets a personal link: `/{token}` (the cabinet page)
 2. The main action is "Добавить в подписку" (Add to subscription)
-3. This opens a Happ deep-link: `happ://add/<encoded /sub/{token}>`
-4. Happ fetches `/sub/{token}`, imports the VLESS URL + subscription headers
+3. This opens a Happ deep-link: `happ://add/<encoded /{token}>`
+4. Happ fetches `/{token}`, imports the VLESS URL + subscription headers
 5. Happ manages device limits client-side via HWID headers
 
 ## Endpoints
@@ -15,9 +15,8 @@ Subscription-only VPN service. Users connect through the Happ client — no manu
 | Route | Description |
 |---|---|
 | `GET /health` | Health check — returns `{"status":"ok"}` |
-| `GET /{token}` | Personal user cabinet (main shareable link) |
+| `GET /{token}` | Personal user cabinet and Happ subscription endpoint (unified) |
 | `GET /u/{token}` | Alias for `/{token}` |
-| `GET /sub/{token}` | Happ subscription endpoint — VLESS URL + metadata headers |
 | `POST /api/device/register` | Register or update a device (enforces per-user limit) |
 | `POST /api/device/remove` | Deactivate a device |
 | `GET /api/profile/{token}?device_id=` | Return VPN profile JSON, auto-register device |
@@ -34,7 +33,7 @@ Expired / inactive users are blocked from all endpoints except device removal (c
 ## User management (CLI)
 
 ```bash
-# Create user
+# Create user (auto-generated tokens are 16 characters; existing tokens are not changed)
 python -m backend.cli create-user --username alice --device-limit 5
 python -m backend.cli create-user --username bob --token bob123 --expires-days 90
 
@@ -67,7 +66,6 @@ uvicorn backend.app:app --reload
 Open:
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/demo-token`
-- `http://127.0.0.1:8000/sub/demo-token`
 
 ## Tests
 
@@ -352,7 +350,6 @@ VPN_TRANSPORT=tcp
 ```bash
 curl -i https://vpn.your-domain.com/health
 curl -i https://vpn.your-domain.com/demo-token
-curl -i https://vpn.your-domain.com/sub/demo-token
 curl -s "https://vpn.your-domain.com/api/profile/demo-token?device_id=test-device" | python3 -m json.tool
 ```
 
@@ -361,7 +358,6 @@ curl -s "https://vpn.your-domain.com/api/profile/demo-token?device_id=test-devic
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/demo-token
-curl -i http://127.0.0.1:8000/sub/demo-token
 
 curl -s -X POST http://127.0.0.1:8000/api/device/register \
   -H "Content-Type: application/json" \

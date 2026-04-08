@@ -42,8 +42,8 @@ logger = logging.getLogger(__name__)
 #   docker compose logs -f | grep HAPP-DIAG
 #
 # To remove later: delete this block and the _log_happ_sub_request() call in
-# happ_subscription(). Also remove debug_happ_sub_requests from config.py and
-# .env.example.
+# build_happ_subscription_response(). Also remove debug_happ_sub_requests from
+# config.py and .env.example.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Headers that may contain secrets — redact their values in diagnostics logs.
@@ -60,7 +60,7 @@ _REDACTED_HEADER_NAMES: frozenset[str] = frozenset({
 
 
 def _log_happ_sub_request(request: Request, token: str) -> None:
-    """TEMP: Emit diagnostics for an incoming /sub/{token} request via root logger WARNING.
+    """TEMP: Emit diagnostics for an incoming Happ subscription request via root logger WARNING.
 
     Uses logging.warning() (root logger) so output is guaranteed to appear in
     Docker/uvicorn stdout regardless of how named loggers are configured.
@@ -119,7 +119,7 @@ def _build_real_subscription_body(user: User, *, vless_uuid: str | None = None) 
     non-Happ clients working while Happ clients migrate to per-device UUIDs.
     """
     effective_uuid = vless_uuid if vless_uuid else user.uuid
-    return build_vless_url(user_uuid=effective_uuid, username=user.username, settings=settings)
+    return build_vless_url(user_uuid=effective_uuid, settings=settings)
 
 
 def _build_happ_routing_payload() -> dict:
@@ -312,7 +312,6 @@ def _json_or_download_response(
 ) -> Response:
     url = build_vless_url(
         user_uuid=profile["outbounds"][0]["uuid"],
-        username=username,
         settings=settings,
     )
 
@@ -420,11 +419,10 @@ def build_happ_subscription_response(
     token: str,
     db: Session,
 ) -> Response:
-    """Build the Happ subscription response for an already-looked-up user.
+    """Build the Happ subscription response for a Happ subscription client.
 
-    This is the single shared implementation used by both /{token} (canonical)
-    and /sub/{token} (legacy compatibility alias). Both active and
-    blocked/expired users are handled here.
+    Called from /{token} when the request is identified as a Happ client.
+    Both active and blocked/expired users are handled here.
 
     Device registration (when x-hwid is present):
       - Known active device → update metadata + last_seen_at, serve subscription.
@@ -438,7 +436,7 @@ def build_happ_subscription_response(
     Only currently active devices refresh without a limit check.
     """
     # TEMP: emit diagnostics when DEBUG_HAPP_SUB_REQUESTS=true.
-    # Fires for both /{token} and /sub/{token} since both call this function.
+    # Fires for /{token} Happ requests.
     # Grep for [HAPP-DIAG] in container logs.
     if settings.debug_happ_sub_requests:
         _log_happ_sub_request(request, token)
@@ -465,8 +463,7 @@ def build_happ_subscription_response(
     # ── Server-side device registration from Happ headers ────────────────────
     #
     # Extract the hardware identifier Happ sends in every subscription request.
-    # If x-hwid is absent (legacy /sub/{token} imports, or non-Happ clients
-    # hitting this path) we skip registration — no fake device rows are created.
+    # If x-hwid is absent we skip registration — no fake device rows are created.
     #
     # For known devices: update metadata + last_seen_at, reactivate if needed.
     # For new devices:   enforce max_devices before inserting.
@@ -502,9 +499,9 @@ def build_happ_subscription_response(
     # ─────────────────────────────────────────────────────────────────────────
 
     profile_title = b64encode(
-        f"SHASHKOFFVPN {user.username}".encode("utf-8")).decode("utf-8")
+        "SHASHKOFF VPN".encode("utf-8")).decode("utf-8")
     announce = b64encode(
-        "Subscription | SHASHKOFFVPN".encode("utf-8")).decode("utf-8")
+        f"Subscription | {user.username}".encode("utf-8")).decode("utf-8")
     expire_ts = int(user.expires_at.timestamp()) if user.expires_at else _UNLIMITED_EXPIRE_TS
 
     # /{token} is now the canonical personal link — both the web page and the
@@ -591,7 +588,7 @@ def build_happ_subscription_response(
         "subscription-always-hwid-enable": "1",
         "subscription-userinfo": f"upload=0; download=0; total=0; expire={expire_ts}",
         "subscriptions-collapse": "0",
-        "support-url": fallback_url,
+        "support-url": "https://t.me/freeretard",
         "announce": f"base64:{announce}",
         "x-hwid-active": "true",
         "x-hwid-limit": str(user.max_devices),
@@ -606,10 +603,7 @@ def build_happ_subscription_response(
     # connects with a unique VPN credential. Revoking that device_uuid from
     # the Xray config terminates its VPN access independently of other devices.
     #
-    # Fallback to user.uuid when x-hwid is absent (non-HWID Happ path, legacy
-    # /sub/{token} imports). This is a transitional behaviour — it keeps
-    # existing clients working while they re-import via the canonical link.
-    # See CLAUDE.md "Legacy/shared-UUID behavior" for the staged removal plan.
+    # Fallback to user.uuid when x-hwid is absent (non-HWID Happ path).
     vless_uuid: str | None = happ_device.device_uuid if happ_device else None
     body = _build_real_subscription_body(user, vless_uuid=vless_uuid)
 
@@ -619,30 +613,3 @@ def build_happ_subscription_response(
         media_type="text/plain",
     )
 
-
-# ── Legacy compatibility alias: /sub/{token} ─────────────────────────────────
-#
-# /{token} is the canonical personal link as of this change. Happ clients that
-# previously imported /sub/{token} continue to work via this alias so existing
-# installations do not break.
-#
-# The entire active product flow (cabinet buttons, deep links, copy URL) now
-# uses /{token}. /sub/{token} is NOT exposed in the UI or documentation for
-# new installations. It can be removed once all existing Happ clients have
-# re-imported via the canonical /{token} link.
-
-@router.get("/sub/{token}")
-def happ_subscription(
-    request: Request,
-    token: str,
-    db: Session = Depends(get_db),
-) -> Response:
-    clean_token = token.strip()
-    if not clean_token:
-        return Response("not found", status_code=404)
-
-    user = get_user_by_token(db, clean_token)
-    if user is None:
-        return Response("not found", status_code=404)
-
-    return build_happ_subscription_response(user, request, token=clean_token, db=db)

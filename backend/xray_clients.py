@@ -146,4 +146,5 @@ def apply_xray_client_changes(db: Session, settings: "Settings") -> None:
     reload_xray_if_configured(
         command=settings.xray_reload_command,
         timeout=settings.xray_reload_timeout,
+        watcher_mode=settings.xray_reload_via_watcher,
     )

@@ -64,6 +64,7 @@ def reload_xray_if_configured(
     command: str | None,
     *,
     timeout: int = _DEFAULT_TIMEOUT_SECONDS,
+    watcher_mode: bool = False,
 ) -> bool:
     """Execute the Xray reload command if one is configured.
 
@@ -77,15 +78,26 @@ def reload_xray_if_configured(
       command: the value of XRAY_RELOAD_COMMAND. None or empty → skip.
       timeout: maximum seconds to wait for the command. Sourced from
                XRAY_RELOAD_TIMEOUT_SECONDS (default 10).
+      watcher_mode: True when XRAY_RELOAD_VIA_WATCHER is set. Suppresses
+               the missing-reload WARNING and logs an INFO instead, because
+               the host-side systemd inotify watcher is the intended reload
+               mechanism — the absence of XRAY_RELOAD_COMMAND is deliberate.
     """
     if not command or not command.strip():
-        logger.warning(
-            "xray_reload: XRAY_RELOAD_COMMAND is not set — "
-            "clients config was written to disk but the running Xray "
-            "process has NOT been reloaded. VPN access changes are not "
-            "yet in effect. Set XRAY_RELOAD_COMMAND to enable automatic "
-            "reload (e.g. 'systemctl reload xray')."
-        )
+        if watcher_mode:
+            logger.info(
+                "xray_reload: clients config written; "
+                "host-side watcher is expected to apply changes."
+            )
+        else:
+            logger.warning(
+                "xray_reload: XRAY_RELOAD_COMMAND is not set — "
+                "clients config was written to disk but the running Xray "
+                "process has NOT been reloaded. VPN access changes are not "
+                "yet in effect. Set XRAY_RELOAD_COMMAND to enable automatic "
+                "reload, or set XRAY_RELOAD_VIA_WATCHER=true if using the "
+                "host-side systemd watcher."
+            )
         return False
 
     try:
