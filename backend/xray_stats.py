@@ -56,6 +56,34 @@ def format_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def combined_traffic(
+    stored_up: int,
+    stored_down: int,
+    live: "UserTrafficStats | None",
+) -> "UserTrafficStats":
+    """Combine persisted historical traffic with live Xray stats.
+
+    stored_up / stored_down: cumulative bytes from deleted devices
+      (user.traffic_up_bytes / user.traffic_down_bytes from DB).
+    live: real-time stats from Xray for currently active devices,
+      or None when Xray is unreachable / not configured.
+
+    Returns a UserTrafficStats that is always non-None. When live is None,
+    only the stored values are returned — never loses already-persisted data.
+    """
+    if live is not None:
+        up = stored_up + live.upload_bytes
+        down = stored_down + live.download_bytes
+    else:
+        up = stored_up
+        down = stored_down
+    return UserTrafficStats(
+        upload_bytes=up,
+        download_bytes=down,
+        total_bytes=up + down,
+    )
+
+
 # ── Minimal protobuf encoder ──────────────────────────────────────────────────
 
 
