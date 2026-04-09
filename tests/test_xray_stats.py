@@ -26,6 +26,7 @@ from backend.xray_stats import (
     decode_query_stats_response,
     encode_query_stats_request,
     format_bytes,
+    get_device_traffic,
     get_user_traffic,
     get_user_traffic_active,
 )
@@ -544,3 +545,65 @@ class TestGetUserTrafficActive:
             )
         assert result is not None
         assert result.upload_bytes == 777
+
+
+# ── get_device_traffic ────────────────────────────────────────────────────────
+
+
+class TestGetDeviceTraffic:
+    def test_returns_none_when_addr_empty(self):
+        result = get_device_traffic(
+            username="alice", device_label="my-device", xray_api_addr=""
+        )
+        assert result is None
+
+    def test_returns_none_when_username_empty(self):
+        result = get_device_traffic(
+            username="", device_label="my-device", xray_api_addr="127.0.0.1:10085"
+        )
+        assert result is None
+
+    def test_returns_none_when_device_label_empty(self):
+        result = get_device_traffic(
+            username="alice", device_label="", xray_api_addr="127.0.0.1:10085"
+        )
+        assert result is None
+
+    def test_returns_none_when_xray_unreachable(self):
+        with patch("backend.xray_stats._call_query_stats", return_value=None):
+            result = get_device_traffic(
+                username="alice", device_label="my-device", xray_api_addr="127.0.0.1:10085"
+            )
+        assert result is None
+
+    def test_returns_device_stats(self):
+        raw = [
+            ("user>>>alice/my-device>>>traffic>>>uplink", 3_000),
+            ("user>>>alice/my-device>>>traffic>>>downlink", 7_000),
+        ]
+        with patch("backend.xray_stats._call_query_stats", return_value=raw):
+            result = get_device_traffic(
+                username="alice", device_label="my-device", xray_api_addr="127.0.0.1:10085"
+            )
+        assert result is not None
+        assert result.upload_bytes == 3_000
+        assert result.download_bytes == 7_000
+        assert result.total_bytes == 10_000
+
+    def test_uses_device_specific_pattern(self):
+        """The query pattern must include the device label to avoid fetching all users."""
+        with patch("backend.xray_stats._call_query_stats", return_value=[]) as mock_fn:
+            get_device_traffic(
+                username="alice", device_label="my-device", xray_api_addr="127.0.0.1:10085"
+            )
+        args, kwargs = mock_fn.call_args
+        pattern = kwargs.get("pattern") or args[1]
+        assert "user>>>alice/my-device" in pattern
+
+    def test_returns_zero_when_no_traffic(self):
+        with patch("backend.xray_stats._call_query_stats", return_value=[]):
+            result = get_device_traffic(
+                username="alice", device_label="my-device", xray_api_addr="127.0.0.1:10085"
+            )
+        assert result is not None
+        assert result.total_bytes == 0

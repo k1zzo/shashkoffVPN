@@ -349,3 +349,48 @@ def get_user_traffic_active(
         download_bytes=download,
         total_bytes=upload + download,
     )
+
+
+def get_device_traffic(
+    username: str,
+    device_label: str,
+    xray_api_addr: str | None,
+    timeout: float = 3.0,
+) -> UserTrafficStats | None:
+    """Query Xray for the traffic of one specific device.
+
+    device_label: device.device_id[:24] — the label used in the Xray email
+      for this device (format: "username/device_label").
+
+    Used at device deletion time to capture the device's final traffic counter
+    before it is removed from the active client set.
+
+    Returns None when addr is empty, username/label is empty, or Xray
+    is unreachable. Returns UserTrafficStats(0, 0, 0) for a device with no
+    recorded traffic (honest zero, not unavailable).
+    """
+    if not username or not device_label or not xray_api_addr:
+        return None
+
+    # Pattern targets exactly this device's email prefix.
+    # e.g. "user>>>alice/my-device" matches:
+    #   user>>>alice/my-device>>>traffic>>>uplink
+    #   user>>>alice/my-device>>>traffic>>>downlink
+    pattern = f"user>>>{username}/{device_label}"
+    raw = _call_query_stats(addr=xray_api_addr, pattern=pattern, timeout=timeout)
+    if raw is None:
+        return None
+
+    upload = 0
+    download = 0
+    for name, value in raw:
+        if ">>>traffic>>>uplink" in name:
+            upload += max(0, value)
+        elif ">>>traffic>>>downlink" in name:
+            download += max(0, value)
+
+    return UserTrafficStats(
+        upload_bytes=upload,
+        download_bytes=download,
+        total_bytes=upload + download,
+    )
