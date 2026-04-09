@@ -18,6 +18,7 @@ from backend.subscription_utils import (
     build_subscription_url,
     is_happ_request,
 )
+from backend.xray_stats import format_bytes, get_user_traffic
 
 router = APIRouter(tags=["user-page"])
 settings = get_settings()
@@ -112,6 +113,25 @@ def render_user_page(
     expires_at_label = user.expires_at.strftime(
         "%d.%m.%Y") if user.expires_at else "Never"
 
+    # ── Traffic stats (real, from Xray) ──────────────────────────────────────
+    # Only queried when XRAY_API_ADDR is configured and user is accessible.
+    # Returns None when the API is unreachable — shown as "N/A" rather than
+    # a fake "0 GB" to be honest about the unavailability.
+    traffic_stats = None
+    if settings.xray_api_addr and accessible:
+        traffic_stats = get_user_traffic(
+            username=user.username,
+            xray_api_addr=settings.xray_api_addr,
+        )
+
+    if traffic_stats is not None:
+        traffic_used = format_bytes(traffic_stats.total_bytes)
+        traffic_summary = f"{traffic_used} / ∞"
+    else:
+        traffic_used = "N/A"
+        traffic_summary = "N/A"
+    # ─────────────────────────────────────────────────────────────────────────
+
     return request.app.state.templates.TemplateResponse(
         request,
         "user_page.html",
@@ -127,9 +147,9 @@ def render_user_page(
                 "devices_used": active_devices or 0,
                 "max_devices": user.max_devices,
                 "devices_summary": f"{active_devices or 0} / {user.max_devices}",
-                "traffic_used": "0 GB",
+                "traffic_used": traffic_used,
                 "traffic_total": "∞",
-                "traffic_summary": "0 GB / ∞",
+                "traffic_summary": traffic_summary,
             },
             "devices": [
                 {

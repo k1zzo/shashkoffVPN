@@ -147,6 +147,24 @@ class Settings:
     # When False (default), the warning is kept to alert operators that changes
     # are not being applied automatically.
     xray_reload_via_watcher: bool
+    # ── Xray stats API ───────────────────────────────────────────────────────────
+    # When set, the gRPC address of the Xray StatsService.  The backend queries
+    # this address when serving the user cabinet and Happ subscription to report
+    # real total traffic usage instead of a hardcoded 0.
+    #
+    # Xray must be configured with stats enabled (see CLAUDE.md § Xray stats).
+    # In Docker deployments the address must be reachable from inside the
+    # container — typically the host's Docker bridge IP, e.g. 172.17.0.1:10085.
+    # In bare-metal deployments use 127.0.0.1:10085 (or whatever port Xray
+    # listens on for the API inbound).
+    #
+    # Example:
+    #   XRAY_API_ADDR=127.0.0.1:10085      (non-Docker)
+    #   XRAY_API_ADDR=172.17.0.1:10085     (Docker, Linux host)
+    #
+    # If unset, traffic stats are reported as "N/A" in the cabinet and the
+    # subscription-userinfo upload/download fields remain 0 (honest: unknown).
+    xray_api_addr: str | None
     # ── Temporary diagnostics ─────────────────────────────────────────────────
     # When debug_happ_sub_requests is True, /{token} logs full request
     # metadata (headers, query params, IP) to the "happ.sub.diag" logger.
@@ -206,6 +224,9 @@ class Settings:
         watcher_raw = os.getenv("XRAY_RELOAD_VIA_WATCHER", "").strip().lower()
         xray_reload_via_watcher = watcher_raw in ("1", "true", "yes")
 
+        xray_api_addr_raw = os.getenv("XRAY_API_ADDR", "").strip()
+        xray_api_addr = xray_api_addr_raw if xray_api_addr_raw else None
+
         return cls(
             app_name=os.getenv("APP_NAME", "SHASHKOFFVPN"),
             environment=os.getenv("APP_ENV", "development"),
@@ -233,6 +254,7 @@ class Settings:
             xray_reload_command=xray_reload_command,
             xray_reload_timeout=xray_reload_timeout,
             xray_reload_via_watcher=xray_reload_via_watcher,
+            xray_api_addr=xray_api_addr,
         )
 
 

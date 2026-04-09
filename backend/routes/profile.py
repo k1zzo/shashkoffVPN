@@ -23,6 +23,7 @@ from backend.queries import (
 from backend.subscription_utils import build_subscription_url, build_vless_url
 from backend.url_utils import build_app_url
 from backend.xray_clients import apply_xray_client_changes
+from backend.xray_stats import get_user_traffic
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
@@ -574,6 +575,23 @@ def build_happ_subscription_response(
     #   - Device names and last_seen_at in the cabinet reflect DB state only
     #     (what the client told us at registration). They are not sourced from
     #     Happ and do not reflect actual connection activity for Happ users.
+    # ── Traffic stats (real, from Xray) ──────────────────────────────────────
+    # upload/download in subscription-userinfo are the bytes consumed by the
+    # user. total=0 means no quota (unlimited).  We only update upload and
+    # download — never total — with Xray stats.
+    # When XRAY_API_ADDR is not set, or the API is unreachable, upload and
+    # download stay at 0 (the Happ subscription protocol has no "unknown" value
+    # for these fields; 0 is the conventional "no data yet / unavailable").
+    _traffic = None
+    if settings.xray_api_addr:
+        _traffic = get_user_traffic(
+            username=user.username,
+            xray_api_addr=settings.xray_api_addr,
+        )
+    _upload_bytes = _traffic.upload_bytes if _traffic is not None else 0
+    _download_bytes = _traffic.download_bytes if _traffic is not None else 0
+    # ─────────────────────────────────────────────────────────────────────────
+
     resp_headers = {
         "Access-Control-Allow-Origin": "*",
         "Content-Disposition": f'attachment; filename="user_{user.id}_{user.public_token}"',
@@ -586,7 +604,7 @@ def build_happ_subscription_response(
         "profile-web-page-url": canonical_url,
         "providerid": "6QlMYR5q",
         "subscription-always-hwid-enable": "1",
-        "subscription-userinfo": f"upload=0; download=0; total=0; expire={expire_ts}",
+        "subscription-userinfo": f"upload={_upload_bytes}; download={_download_bytes}; total=0; expire={expire_ts}",
         "subscriptions-collapse": "0",
         "support-url": "https://t.me/freeretard",
         "announce": f"base64:{announce}",
