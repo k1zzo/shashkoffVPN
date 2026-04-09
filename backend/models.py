@@ -25,6 +25,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
+    traffic_up_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    traffic_down_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     devices: Mapped[list["Device"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
