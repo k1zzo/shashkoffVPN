@@ -27,6 +27,7 @@ from backend.xray_stats import (
     encode_query_stats_request,
     format_bytes,
     get_user_traffic,
+    get_user_traffic_active,
 )
 
 
@@ -450,3 +451,96 @@ class TestCombinedTraffic:
         """When live=None (Xray down), return stored totals unchanged."""
         result = combined_traffic(stored_up=500_000_000, stored_down=2_000_000_000, live=None)
         assert result.total_bytes == 2_500_000_000
+
+
+# ── get_user_traffic_active ───────────────────────────────────────────────────
+
+
+class TestGetUserTrafficActive:
+    def test_returns_none_when_addr_empty(self):
+        result = get_user_traffic_active(
+            username="alice", active_labels=frozenset(["dev1"]), xray_api_addr=""
+        )
+        assert result is None
+
+    def test_returns_none_when_username_empty(self):
+        result = get_user_traffic_active(
+            username="", active_labels=frozenset(["dev1"]), xray_api_addr="127.0.0.1:10085"
+        )
+        assert result is None
+
+    def test_returns_none_when_xray_unreachable(self):
+        with patch("backend.xray_stats._call_query_stats", return_value=None):
+            result = get_user_traffic_active(
+                username="alice",
+                active_labels=frozenset(["dev1"]),
+                xray_api_addr="127.0.0.1:10085",
+            )
+        assert result is None
+
+    def test_filters_to_active_labels_only(self):
+        """Stats for deleted device labels must be excluded from the result."""
+        raw = [
+            ("user>>>alice/active-device>>>traffic>>>uplink", 1_000),
+            ("user>>>alice/active-device>>>traffic>>>downlink", 5_000),
+            ("user>>>alice/deleted-device>>>traffic>>>uplink", 9_999),   # must be excluded
+            ("user>>>alice/deleted-device>>>traffic>>>downlink", 9_999), # must be excluded
+        ]
+        with patch("backend.xray_stats._call_query_stats", return_value=raw):
+            result = get_user_traffic_active(
+                username="alice",
+                active_labels=frozenset(["active-device"]),
+                xray_api_addr="127.0.0.1:10085",
+            )
+        assert result is not None
+        assert result.upload_bytes == 1_000
+        assert result.download_bytes == 5_000
+        assert result.total_bytes == 6_000
+
+    def test_empty_active_labels_returns_zero_stats(self):
+        """User with no registered devices → zero live stats, not None."""
+        raw = [("user>>>alice/some-device>>>traffic>>>uplink", 1_000)]
+        with patch("backend.xray_stats._call_query_stats", return_value=raw):
+            result = get_user_traffic_active(
+                username="alice",
+                active_labels=frozenset(),
+                xray_api_addr="127.0.0.1:10085",
+            )
+        assert result is not None
+        assert result.upload_bytes == 0
+        assert result.download_bytes == 0
+        assert result.total_bytes == 0
+
+    def test_multiple_active_devices_aggregated(self):
+        raw = [
+            ("user>>>bob/device-a>>>traffic>>>uplink", 100),
+            ("user>>>bob/device-a>>>traffic>>>downlink", 200),
+            ("user>>>bob/device-b>>>traffic>>>uplink", 50),
+            ("user>>>bob/device-b>>>traffic>>>downlink", 150),
+        ]
+        with patch("backend.xray_stats._call_query_stats", return_value=raw):
+            result = get_user_traffic_active(
+                username="bob",
+                active_labels=frozenset(["device-a", "device-b"]),
+                xray_api_addr="127.0.0.1:10085",
+            )
+        assert result is not None
+        assert result.upload_bytes == 150   # 100 + 50
+        assert result.download_bytes == 350  # 200 + 150
+        assert result.total_bytes == 500
+
+    def test_label_truncation_matches_xray_email(self):
+        """Labels are device_id[:24]; a 30-char device_id truncates to first 24."""
+        long_id = "a" * 30
+        label = long_id[:24]  # "aaaaaaaaaaaaaaaaaaaaaaaa"
+        raw = [
+            (f"user>>>carol/{label}>>>traffic>>>uplink", 777),
+        ]
+        with patch("backend.xray_stats._call_query_stats", return_value=raw):
+            result = get_user_traffic_active(
+                username="carol",
+                active_labels=frozenset([label]),
+                xray_api_addr="127.0.0.1:10085",
+            )
+        assert result is not None
+        assert result.upload_bytes == 777

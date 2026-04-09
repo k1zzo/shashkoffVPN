@@ -291,3 +291,61 @@ def get_user_traffic(
         download_bytes=download,
         total_bytes=upload + download,
     )
+
+
+def get_user_traffic_active(
+    username: str,
+    active_labels: "frozenset[str]",
+    xray_api_addr: str | None,
+    timeout: float = 3.0,
+) -> UserTrafficStats | None:
+    """Query Xray for traffic, filtered to currently active device labels only.
+
+    active_labels: frozenset of device.device_id[:24] for all currently active
+      devices. Stats for any other email label (e.g. deleted devices) are
+      excluded from the result — this prevents double-counting when stored
+      historical traffic already accounts for those deleted devices.
+
+    Returns None when:
+      - xray_api_addr is empty or None
+      - username is empty
+      - the Xray API is unreachable or returns an error
+
+    Returns UserTrafficStats(0, 0, 0) when:
+      - active_labels is empty (no registered devices)
+      - all devices have zero traffic
+
+    A result with all-zero counters is an honest zero, not "unavailable".
+    """
+    if not username or not xray_api_addr:
+        return None
+
+    pattern = f"user>>>{username}/"
+    raw = _call_query_stats(addr=xray_api_addr, pattern=pattern, timeout=timeout)
+    if raw is None:
+        return None
+
+    # Build a set of allowed prefixes — only stat names that start with one of
+    # these are counted. Prefix format: "user>>>username/label>>>"
+    # e.g. "user>>>alice/my-device>>>" matches
+    #   user>>>alice/my-device>>>traffic>>>uplink
+    #   user>>>alice/my-device>>>traffic>>>downlink
+    active_prefixes = frozenset(
+        f"user>>>{username}/{label}>>>" for label in active_labels
+    )
+
+    upload = 0
+    download = 0
+    for name, value in raw:
+        if not any(name.startswith(p) for p in active_prefixes):
+            continue
+        if ">>>traffic>>>uplink" in name:
+            upload += max(0, value)
+        elif ">>>traffic>>>downlink" in name:
+            download += max(0, value)
+
+    return UserTrafficStats(
+        upload_bytes=upload,
+        download_bytes=download,
+        total_bytes=upload + download,
+    )
