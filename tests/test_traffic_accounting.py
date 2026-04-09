@@ -161,3 +161,76 @@ class TestDeletionSnapshot:
         db.refresh(user)
         assert user.traffic_up_bytes == 15_000_000   # 10M + 5M
         assert user.traffic_down_bytes == 35_000_000  # 20M + 15M
+
+
+# ── Cabinet display ───────────────────────────────────────────────────────────
+
+
+class TestCabinetDisplay:
+    def test_new_user_shows_zero_with_api_configured(self, client, active_user):
+        """Brand new user (zero stored + zero live) shows '0 B / ∞'."""
+        import backend.routes.user_page as page_mod
+        patched = page_mod.settings.__class__(
+            **{f: getattr(page_mod.settings, f) for f in page_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": "127.0.0.1:10085"}
+        )
+        zero_stats = UserTrafficStats(upload_bytes=0, download_bytes=0, total_bytes=0)
+        with patch.object(page_mod, "settings", patched):
+            with patch("backend.routes.user_page.get_user_traffic_active", return_value=zero_stats):
+                resp = client.get(f"/{active_user.public_token}")
+        assert resp.status_code == 200
+        assert "0 B / ∞" in resp.text
+        assert "N/A" not in resp.text
+
+    def test_new_user_shows_zero_without_api(self, client, active_user):
+        """Brand new user with no API configured still shows '0 B / ∞' (stored=0)."""
+        import backend.routes.user_page as page_mod
+        patched = page_mod.settings.__class__(
+            **{f: getattr(page_mod.settings, f) for f in page_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": None}
+        )
+        with patch.object(page_mod, "settings", patched):
+            resp = client.get(f"/{active_user.public_token}")
+        assert resp.status_code == 200
+        assert "0 B / ∞" in resp.text
+        assert "N/A" not in resp.text
+
+    def test_stored_traffic_shown_when_xray_unavailable(self, client, db):
+        """If Xray is down, stored historical totals are still shown."""
+        user = _make_user(
+            db,
+            username="stored-user",
+            token="stored-token",
+            traffic_up_bytes=50_000_000,
+            traffic_down_bytes=150_000_000,
+        )
+        import backend.routes.user_page as page_mod
+        patched = page_mod.settings.__class__(
+            **{f: getattr(page_mod.settings, f) for f in page_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": "127.0.0.1:10085"}
+        )
+        with patch.object(page_mod, "settings", patched):
+            with patch("backend.routes.user_page.get_user_traffic_active", return_value=None):
+                resp = client.get(f"/{user.public_token}")
+        assert resp.status_code == 200
+        # stored total = 50_000_000 + 150_000_000 = 200_000_000 bytes
+        # format_bytes uses 1024-based units: 200_000_000 / 1024^2 ≈ 190.73 MB
+        assert "190.73 MB" in resp.text
+        assert "N/A" not in resp.text
+
+    def test_repeated_page_loads_do_not_mutate_stored_fields(self, client, db):
+        """Page views must never write to traffic_up_bytes / traffic_down_bytes."""
+        user = _make_user(db, username="readonly-user", token="readonly-token")
+        import backend.routes.user_page as page_mod
+        patched = page_mod.settings.__class__(
+            **{f: getattr(page_mod.settings, f) for f in page_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": None}
+        )
+        with patch.object(page_mod, "settings", patched):
+            client.get(f"/{user.public_token}")
+            client.get(f"/{user.public_token}")
+            client.get(f"/{user.public_token}")
+
+        db.refresh(user)
+        assert user.traffic_up_bytes == 0
+        assert user.traffic_down_bytes == 0

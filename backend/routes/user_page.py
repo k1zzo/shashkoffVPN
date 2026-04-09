@@ -18,7 +18,7 @@ from backend.subscription_utils import (
     build_subscription_url,
     is_happ_request,
 )
-from backend.xray_stats import format_bytes, get_user_traffic
+from backend.xray_stats import combined_traffic, format_bytes, get_user_traffic_active
 
 router = APIRouter(tags=["user-page"])
 settings = get_settings()
@@ -113,23 +113,31 @@ def render_user_page(
     expires_at_label = user.expires_at.strftime(
         "%d.%m.%Y") if user.expires_at else "Never"
 
-    # ── Traffic stats (real, from Xray) ──────────────────────────────────────
-    # Only queried when XRAY_API_ADDR is configured and user is accessible.
-    # Returns None when the API is unreachable — shown as "N/A" rather than
-    # a fake "0 GB" to be honest about the unavailability.
-    traffic_stats = None
-    if settings.xray_api_addr and accessible:
-        traffic_stats = get_user_traffic(
+    # ── Traffic stats: stored historical + live active devices ────────────────
+    # active_labels is the set of device_id[:24] for all currently active
+    # devices.  get_user_traffic_active() queries Xray and filters to those
+    # labels only, so deleted devices' counters are never double-counted with
+    # the stored historical totals.
+    #
+    # combined_traffic() always returns a UserTrafficStats (never None):
+    #   - When Xray is available: stored + live.
+    #   - When Xray is down or not configured: stored only.
+    # Both cases produce "0 B / ∞" for a brand new user (stored=0, live=0/None).
+    _active_labels = frozenset(d.device_id[:24] for d in device_rows)
+    _live = None
+    if accessible and settings.xray_api_addr:
+        _live = get_user_traffic_active(
             username=user.username,
+            active_labels=_active_labels,
             xray_api_addr=settings.xray_api_addr,
         )
-
-    if traffic_stats is not None:
-        traffic_used = format_bytes(traffic_stats.total_bytes)
-        traffic_summary = f"{traffic_used} / ∞"
-    else:
-        traffic_used = "N/A"
-        traffic_summary = "N/A"
+    _total = combined_traffic(
+        stored_up=user.traffic_up_bytes or 0,
+        stored_down=user.traffic_down_bytes or 0,
+        live=_live,
+    )
+    traffic_used = format_bytes(_total.total_bytes)
+    traffic_summary = f"{traffic_used} / ∞"
     # ─────────────────────────────────────────────────────────────────────────
 
     return request.app.state.templates.TemplateResponse(

@@ -286,18 +286,22 @@ _HAPP_HEADERS = {
 
 
 class TestCabinetTrafficDisplay:
-    def test_shows_na_when_xray_api_not_configured(self, client, active_user):
-        """When XRAY_API_ADDR is not set, cabinet shows N/A for traffic."""
+    def test_shows_zero_traffic_when_xray_api_not_configured(self, client, active_user):
+        """When XRAY_API_ADDR is not set, cabinet shows stored total (0 B / ∞ for new users).
+
+        Replaces the old test_shows_na_when_xray_api_not_configured.
+        N/A is no longer shown — stored traffic (even 0) is always displayed.
+        """
         import backend.routes.user_page as page_mod
         patched = page_mod.settings.__class__(
-            **{**page_mod.settings.__dataclass_fields__,
-               **{f: getattr(page_mod.settings, f) for f in page_mod.settings.__dataclass_fields__},
-               "xray_api_addr": None}
+            **{f: getattr(page_mod.settings, f) for f in page_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": None}
         )
         with patch.object(page_mod, "settings", patched):
             resp = client.get(f"/{active_user.public_token}")
         assert resp.status_code == 200
-        assert "N/A" in resp.text
+        assert "0 B / ∞" in resp.text
+        assert "N/A" not in resp.text
 
     def test_shows_real_traffic_when_api_available(self, client, active_user):
         """Cabinet shows formatted bytes when Xray API returns stats."""
@@ -307,19 +311,18 @@ class TestCabinetTrafficDisplay:
             | {"xray_api_addr": "127.0.0.1:10085"}
         )
         stats = UserTrafficStats(
-            upload_bytes=10 * 1024 ** 2,    # 10 MB
-            download_bytes=500 * 1024 ** 2,  # 500 MB
+            upload_bytes=10 * 1024 ** 2,
+            download_bytes=500 * 1024 ** 2,
             total_bytes=510 * 1024 ** 2,
         )
         with patch.object(page_mod, "settings", patched):
-            with patch("backend.routes.user_page.get_user_traffic", return_value=stats):
+            with patch("backend.routes.user_page.get_user_traffic_active", return_value=stats):
                 resp = client.get(f"/{active_user.public_token}")
         assert resp.status_code == 200
-        # Total is 510 MB → "510.00 MB"
         assert "510.00 MB" in resp.text
 
     def test_shows_zero_traffic_honestly(self, client, active_user):
-        """0 bytes of traffic shows '0 B', not 'N/A'."""
+        """0 bytes of traffic shows '0 B / ∞', not 'N/A'."""
         import backend.routes.user_page as page_mod
         patched = page_mod.settings.__class__(
             **{f: getattr(page_mod.settings, f) for f in page_mod.settings.__dataclass_fields__}
@@ -327,10 +330,10 @@ class TestCabinetTrafficDisplay:
         )
         stats = UserTrafficStats(upload_bytes=0, download_bytes=0, total_bytes=0)
         with patch.object(page_mod, "settings", patched):
-            with patch("backend.routes.user_page.get_user_traffic", return_value=stats):
+            with patch("backend.routes.user_page.get_user_traffic_active", return_value=stats):
                 resp = client.get(f"/{active_user.public_token}")
         assert resp.status_code == 200
-        assert "0 B" in resp.text
+        assert "0 B / ∞" in resp.text
         assert "N/A" not in resp.text
 
 
