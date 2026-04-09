@@ -21,6 +21,7 @@ from backend.queries import (
     is_user_accessible,
 )
 from backend.xray_clients import apply_xray_client_changes
+from backend.xray_stats import get_device_traffic
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -162,6 +163,27 @@ def remove_device(
     device = get_active_device(db, user.id, device_id)
     if device is None:
         return JSONResponse(status_code=404, content={"detail": "Device not found"})
+
+    # ── Traffic snapshot ──────────────────────────────────────────────────────
+    # Before deactivating, capture this device's current Xray traffic counter
+    # and add it to the user's persistent stored totals.  This ensures the
+    # user's cumulative total never decreases when a device is removed, even
+    # after Xray resets its in-memory counters on restart.
+    #
+    # If Xray is unreachable, we proceed with deletion and accept that the
+    # device's final traffic is not captured — honest limitation, not a crash.
+    if settings.xray_api_addr:
+        device_label = (device.device_id or "")[:24]
+        _snapshot = get_device_traffic(
+            username=user.username,
+            device_label=device_label,
+            xray_api_addr=settings.xray_api_addr,
+        )
+        if _snapshot is not None and _snapshot.total_bytes > 0:
+            user.traffic_up_bytes = (user.traffic_up_bytes or 0) + _snapshot.upload_bytes
+            user.traffic_down_bytes = (user.traffic_down_bytes or 0) + _snapshot.download_bytes
+            db.commit()
+    # ─────────────────────────────────────────────────────────────────────────
 
     deactivate_device(db, device)
     # Rebuild Xray clients config to exclude this device's UUID.
