@@ -58,19 +58,6 @@
     btn.textContent = label;
   }
 
-  function triggerCustomSchemeFallback(happLink) {
-    var frame = document.createElement("iframe");
-    frame.style.display = "none";
-    frame.setAttribute("aria-hidden", "true");
-    frame.src = happLink;
-    document.body.appendChild(frame);
-    window.setTimeout(function () {
-      if (frame.parentNode) {
-        frame.parentNode.removeChild(frame);
-      }
-    }, 1500);
-  }
-
   function updateDeviceUsageCounters(activeDevices, maxDevices) {
     var counter = document.querySelector("[data-devices-counter]");
     var summary = document.querySelector("[data-devices-summary]");
@@ -188,34 +175,20 @@
         btn.__addStateTimer = null;
       }, BUTTON_STATE_MS);
 
-      var popup = null;
-      try {
-        popup = window.open("about:blank", "_blank");
-      } catch (err) {
-        popup = null;
-      }
-      if (popup) {
-        try {
-          popup.location.href = happLink;
-        } catch (err) {
-          triggerCustomSchemeFallback(happLink);
-        }
-      } else {
-        window.location.href = happLink;
-      }
+      // Navigate directly to the happ:// deep link from the user's click event.
+      // This triggers the "Open Happ?" system prompt inline — no new tab, no
+      // about:blank page. On iOS and Android, direct navigation from a click
+      // handler is treated as a user gesture and is not blocked by the browser.
+      window.location.href = happLink;
 
-      window.setTimeout(function () {
-        if (document.visibilityState === "visible") {
-          triggerCustomSchemeFallback(happLink);
-        }
-      }, 120);
-
+      // If the app did not open (page is still visible after the system prompt
+      // timeout), fall back to the raw subscription URL so the user can copy it.
       btn.__addFallbackTimer = window.setTimeout(function () {
         if (document.visibilityState !== "hidden") {
           window.location.href = subscriptionUrl;
         }
         btn.__addFallbackTimer = null;
-      }, 850);
+      }, 1500);
     });
   }
 

@@ -19,11 +19,12 @@ from backend.queries import (
     get_device,
     get_user_by_token,
     is_user_accessible,
+    list_active_devices,
 )
 from backend.subscription_utils import build_subscription_url, build_vless_url
 from backend.url_utils import build_app_url
 from backend.xray_clients import apply_xray_client_changes
-from backend.xray_stats import get_user_traffic
+from backend.xray_stats import combined_traffic, get_user_traffic_active
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
@@ -575,21 +576,33 @@ def build_happ_subscription_response(
     #   - Device names and last_seen_at in the cabinet reflect DB state only
     #     (what the client told us at registration). They are not sourced from
     #     Happ and do not reflect actual connection activity for Happ users.
-    # ── Traffic stats (real, from Xray) ──────────────────────────────────────
-    # upload/download in subscription-userinfo are the bytes consumed by the
-    # user. total=0 means no quota (unlimited).  We only update upload and
-    # download — never total — with Xray stats.
-    # When XRAY_API_ADDR is not set, or the API is unreachable, upload and
-    # download stay at 0 (the Happ subscription protocol has no "unknown" value
-    # for these fields; 0 is the conventional "no data yet / unavailable").
-    _traffic = None
+    # ── Traffic stats: stored historical + live active devices ───────────────
+    # upload/download in subscription-userinfo are the cumulative bytes consumed
+    # by the user. total=0 means no quota (unlimited).
+    #
+    # We query only active-device stats from Xray (get_user_traffic_active) to
+    # avoid double-counting deleted devices whose traffic was already snapshotted
+    # into user.traffic_up/down_bytes at deletion time.
+    #
+    # combined_traffic() always returns a non-None result:
+    #   - Xray available: stored + live active.
+    #   - Xray down / unconfigured: stored only (never loses persisted data).
+    _device_rows = list_active_devices(db, user.id)
+    _active_labels = frozenset(d.device_id[:24] for d in _device_rows)
+    _live = None
     if settings.xray_api_addr:
-        _traffic = get_user_traffic(
+        _live = get_user_traffic_active(
             username=user.username,
+            active_labels=_active_labels,
             xray_api_addr=settings.xray_api_addr,
         )
-    _upload_bytes = _traffic.upload_bytes if _traffic is not None else 0
-    _download_bytes = _traffic.download_bytes if _traffic is not None else 0
+    _total = combined_traffic(
+        stored_up=user.traffic_up_bytes or 0,
+        stored_down=user.traffic_down_bytes or 0,
+        live=_live,
+    )
+    _upload_bytes = _total.upload_bytes
+    _download_bytes = _total.download_bytes
     # ─────────────────────────────────────────────────────────────────────────
 
     resp_headers = {

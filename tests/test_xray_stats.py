@@ -346,7 +346,7 @@ class TestHappUserinfoTraffic:
         import backend.routes.profile as profile_mod
         patched = profile_mod.settings.__class__(
             **{f: getattr(profile_mod.settings, f) for f in profile_mod.settings.__dataclass_fields__}
-            | {"xray_api_addr": "127.0.0.1:10085"}
+            | {"xray_api_addr": "127.0.0.1:10085", "xray_clients_config_path": None}
         )
         stats = UserTrafficStats(
             upload_bytes=1_000_000,
@@ -354,7 +354,7 @@ class TestHappUserinfoTraffic:
             total_bytes=10_000_000,
         )
         with patch.object(profile_mod, "settings", patched):
-            with patch("backend.routes.profile.get_user_traffic", return_value=stats):
+            with patch("backend.routes.profile.get_user_traffic_active", return_value=stats):
                 resp = client.get(f"/{active_user.public_token}", headers=_HAPP_HEADERS)
 
         assert resp.status_code == 200
@@ -364,14 +364,14 @@ class TestHappUserinfoTraffic:
         assert "total=0" in userinfo  # quota unchanged
 
     def test_userinfo_uses_zero_when_api_unavailable(self, client, active_user):
-        """When Xray API is unreachable, subscription-userinfo falls back to 0."""
+        """When Xray API is unreachable, subscription-userinfo falls back to stored (0 for new user)."""
         import backend.routes.profile as profile_mod
         patched = profile_mod.settings.__class__(
             **{f: getattr(profile_mod.settings, f) for f in profile_mod.settings.__dataclass_fields__}
-            | {"xray_api_addr": "127.0.0.1:10085"}
+            | {"xray_api_addr": "127.0.0.1:10085", "xray_clients_config_path": None}
         )
         with patch.object(profile_mod, "settings", patched):
-            with patch("backend.routes.profile.get_user_traffic", return_value=None):
+            with patch("backend.routes.profile.get_user_traffic_active", return_value=None):
                 resp = client.get(f"/{active_user.public_token}", headers=_HAPP_HEADERS)
 
         assert resp.status_code == 200
@@ -384,11 +384,11 @@ class TestHappUserinfoTraffic:
         import backend.routes.profile as profile_mod
         patched = profile_mod.settings.__class__(
             **{f: getattr(profile_mod.settings, f) for f in profile_mod.settings.__dataclass_fields__}
-            | {"xray_api_addr": "127.0.0.1:10085"}
+            | {"xray_api_addr": "127.0.0.1:10085", "xray_clients_config_path": None}
         )
         stats = UserTrafficStats(upload_bytes=0, download_bytes=0, total_bytes=0)
         with patch.object(profile_mod, "settings", patched):
-            with patch("backend.routes.profile.get_user_traffic", return_value=stats):
+            with patch("backend.routes.profile.get_user_traffic_active", return_value=stats):
                 resp = client.get(f"/{active_user.public_token}", headers=_HAPP_HEADERS)
 
         assert resp.status_code == 200

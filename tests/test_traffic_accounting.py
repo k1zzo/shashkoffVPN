@@ -234,3 +234,102 @@ class TestCabinetDisplay:
         db.refresh(user)
         assert user.traffic_up_bytes == 0
         assert user.traffic_down_bytes == 0
+
+
+# ── Happ subscription userinfo ────────────────────────────────────────────────
+
+_HAPP_HEADERS = {
+    "user-agent": "Happ/4.2.1",
+    "x-hwid": "traffic-test-hwid",
+    "x-device-os": "iOS 17.0",
+    "x-device-model": "iPhone 15",
+}
+
+
+class TestHappSubscriptionTraffic:
+    def test_userinfo_shows_zero_for_new_user_no_xray(self, client, db):
+        """Brand new user with no Xray configured shows upload=0; download=0."""
+        user = _make_user(db, username="happ-new", token="happ-new-token")
+        import backend.routes.profile as profile_mod
+        patched = profile_mod.settings.__class__(
+            **{f: getattr(profile_mod.settings, f)
+               for f in profile_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": None, "xray_clients_config_path": None}
+        )
+        with patch.object(profile_mod, "settings", patched):
+            resp = client.get(f"/{user.public_token}", headers=_HAPP_HEADERS)
+
+        assert resp.status_code == 200
+        userinfo = resp.headers["subscription-userinfo"]
+        assert "upload=0" in userinfo
+        assert "download=0" in userinfo
+
+    def test_userinfo_includes_stored_traffic_when_xray_unavailable(self, client, db):
+        """Stored historical traffic appears in userinfo even when Xray is down."""
+        user = _make_user(
+            db,
+            username="happ-stored",
+            token="happ-stored-token",
+            traffic_up_bytes=10_000_000,
+            traffic_down_bytes=40_000_000,
+        )
+        import backend.routes.profile as profile_mod
+        patched = profile_mod.settings.__class__(
+            **{f: getattr(profile_mod.settings, f)
+               for f in profile_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": "127.0.0.1:10085", "xray_clients_config_path": None}
+        )
+        with patch.object(profile_mod, "settings", patched):
+            with patch("backend.routes.profile.get_user_traffic_active", return_value=None):
+                resp = client.get(f"/{user.public_token}", headers=_HAPP_HEADERS)
+
+        assert resp.status_code == 200
+        userinfo = resp.headers["subscription-userinfo"]
+        assert f"upload={10_000_000}" in userinfo
+        assert f"download={40_000_000}" in userinfo
+
+    def test_userinfo_combines_stored_and_live_traffic(self, client, db):
+        """subscription-userinfo must reflect stored + live active-device totals."""
+        user = _make_user(
+            db,
+            username="happ-combined",
+            token="happ-combined-token",
+            traffic_up_bytes=5_000_000,
+            traffic_down_bytes=15_000_000,
+        )
+        live_stats = UserTrafficStats(
+            upload_bytes=3_000_000,
+            download_bytes=7_000_000,
+            total_bytes=10_000_000,
+        )
+        import backend.routes.profile as profile_mod
+        patched = profile_mod.settings.__class__(
+            **{f: getattr(profile_mod.settings, f)
+               for f in profile_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": "127.0.0.1:10085", "xray_clients_config_path": None}
+        )
+        with patch.object(profile_mod, "settings", patched):
+            with patch("backend.routes.profile.get_user_traffic_active", return_value=live_stats):
+                resp = client.get(f"/{user.public_token}", headers=_HAPP_HEADERS)
+
+        assert resp.status_code == 200
+        userinfo = resp.headers["subscription-userinfo"]
+        assert f"upload={8_000_000}" in userinfo   # 5M stored + 3M live
+        assert f"download={22_000_000}" in userinfo  # 15M stored + 7M live
+
+    def test_happ_subscription_reads_do_not_mutate_stored_fields(self, client, db):
+        """Subscription fetches must never write to traffic_up_bytes / traffic_down_bytes."""
+        user = _make_user(db, username="happ-readonly", token="happ-readonly-token")
+        import backend.routes.profile as profile_mod
+        patched = profile_mod.settings.__class__(
+            **{f: getattr(profile_mod.settings, f)
+               for f in profile_mod.settings.__dataclass_fields__}
+            | {"xray_api_addr": None, "xray_clients_config_path": None}
+        )
+        with patch.object(profile_mod, "settings", patched):
+            client.get(f"/{user.public_token}", headers=_HAPP_HEADERS)
+            client.get(f"/{user.public_token}", headers=_HAPP_HEADERS)
+
+        db.refresh(user)
+        assert user.traffic_up_bytes == 0
+        assert user.traffic_down_bytes == 0
