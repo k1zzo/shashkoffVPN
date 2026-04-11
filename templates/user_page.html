@@ -108,32 +108,16 @@
         <div class="devices-content">
           <div class="devices-list" data-devices-list>
             {% for device in devices %}
-            {% set platform_lower = (device.platform or '')|lower %}
-            {% set name_lower = (device.device_name or '')|lower %}
-            {% if 'firefox' in platform_lower or 'firefox' in name_lower %}
-            {% set icon_src = 'https://upload.wikimedia.org/wikipedia/commons/a/a0/Firefox_logo%2C_2019.svg' %}
-            {% set icon_alt = 'Firefox' %}
-            {% elif 'safari' in platform_lower or 'safari' in name_lower %}
-            {% set icon_src = 'https://upload.wikimedia.org/wikipedia/commons/5/52/Safari_browser_logo.svg' %}
-            {% set icon_alt = 'Safari' %}
-            {% elif 'chrome' in platform_lower or 'chrome' in name_lower or 'web' in platform_lower %}
-            {% set icon_src =
-            'https://upload.wikimedia.org/wikipedia/commons/e/e1/Google_Chrome_icon_%28February_2022%29.svg' %}
-            {% set icon_alt = 'Chrome' %}
-            {% else %}
-            {% set icon_src = 'https://upload.wikimedia.org/wikipedia/commons/8/87/Desktop_computer_font_awesome.svg' %}
-            {% set icon_alt = 'Устройство' %}
-            {% endif %}
             <div class="device-item" data-device-row data-device-id="{{ device.device_id }}">
               <div class="device-main">
-                <img class="device-icon" src="{{ icon_src }}" alt="{{ icon_alt }}">
+                <img class="device-icon" src="/static/icons/{{ device.icon }}" alt="{{ device.device_title }}">
                 <div class="device-info">
-                  <span class="device-name">{{ device.device_name }}</span>
+                  <span class="device-name">{{ device.device_title }}</span>
                   <span class="device-activity">Последняя активность: {{ device.last_seen_at }}</span>
                 </div>
               </div>
               <button type="button" class="device-remove-btn" data-action-remove-device
-                data-device-id="{{ device.device_id }}" aria-label="Удалить устройство {{ device.device_name }}">
+                data-device-id="{{ device.device_id }}" aria-label="Удалить устройство {{ device.device_title }}">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <polyline points="3 6 5 6 21 6"></polyline>
