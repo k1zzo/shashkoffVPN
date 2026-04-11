@@ -1,3 +1,4 @@
+from datetime import timedelta, timezone
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
@@ -5,6 +6,7 @@ from sqlalchemy.orm import Session
 from backend import happ_limited_links
 from backend.config import get_settings
 from backend.db import get_db
+from backend.platform_utils import format_device_title, platform_icon
 from backend.queries import (
     count_active_devices,
     get_user_by_token,
@@ -22,6 +24,23 @@ from backend.xray_stats import combined_traffic, format_bytes, get_user_traffic_
 
 router = APIRouter(tags=["user-page"])
 settings = get_settings()
+
+# Moscow Standard Time — UTC+3, no DST (Russia abolished DST in 2014).
+_MSK = timezone(timedelta(hours=3))
+
+
+def _fmt_msk_datetime(dt) -> str:
+    """Format a naive UTC datetime as Moscow local time: YYYY-MM-DD HH:MM:SS."""
+    if dt is None:
+        return "Never"
+    return dt.replace(tzinfo=timezone.utc).astimezone(_MSK).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fmt_msk_date(dt) -> str:
+    """Format a naive UTC datetime as a Moscow local date: DD.MM.YYYY."""
+    if dt is None:
+        return "Never"
+    return dt.replace(tzinfo=timezone.utc).astimezone(_MSK).strftime("%d.%m.%Y")
 
 
 @router.get("/{token}")
@@ -110,8 +129,7 @@ def render_user_page(
     else:
         happ_deep_link = build_happ_deep_link(subscription_url)
 
-    expires_at_label = user.expires_at.strftime(
-        "%d.%m.%Y") if user.expires_at else "Never"
+    expires_at_label = _fmt_msk_date(user.expires_at)
 
     # ── Traffic stats: stored historical + live active devices ────────────────
     # active_labels is the set of device_id[:24] for all currently active
@@ -164,11 +182,9 @@ def render_user_page(
                     "device_id": device.device_id,
                     "device_name": device.device_name,
                     "platform": device.platform,
-                    "last_seen_at": (
-                        device.last_seen_at.strftime("%Y-%m-%d %H:%M:%S")
-                        if device.last_seen_at
-                        else "Never"
-                    ),
+                    "last_seen_at": _fmt_msk_datetime(device.last_seen_at),
+                    "device_title": format_device_title(device.platform, device.device_name),
+                    "icon": platform_icon(device.platform),
                 }
                 for device in device_rows
             ],
