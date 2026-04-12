@@ -13,14 +13,29 @@ _PLATFORM_MAP: list[tuple[list[str], str, str]] = [
 ]
 
 # Device-type detection: checked in priority order.
-# tv must come before phone/android to handle "Android TV" correctly.
-# laptop must come before desktop to handle "MacBook" before generic "mac".
+#
+# Ordering rationale:
+#   1. TV first — markers like "smart tv" and "android tv" are unambiguous and
+#      must win over the generic "android" → phone rule below.
+#   2. Tablet before phone — "ipad"/"ipados" must beat "ios"/"iphone".
+#   3. Phone — generic Android/iOS without TV or tablet markers.
+#   4. Explicit desktop Mac models BEFORE the "mac" → laptop rule — "mac mini"
+#      and "imac" must resolve to desktop, not laptop.
+#   5. Laptop — "macbook", and the bare "mac" keyword which appears in both
+#      the platform string "macos" and device names like "Mac" (the fallback
+#      name derive_device_name() assigns when no model header is present).
+#   6. Desktop — Windows, Linux, Darwin, and other non-Mac desktop signals.
 _DEVICE_TYPE_MAP: list[tuple[list[str], str]] = [
     (["android tv", "smart tv", "tvos", " tv"], "tv"),
-    (["ipad", "tablet"], "tablet"),
+    (["ipad", "ipados", "tablet"], "tablet"),
     (["iphone", "android", "mobile", "galaxy"], "phone"),
-    (["macbook", "laptop"], "laptop"),
-    (["windows", "linux", "ubuntu", "debian", "fedora", "arch", "pc", "mac", "darwin"], "desktop"),
+    # Explicit desktop Mac models must precede "mac" so they are not captured
+    # by the laptop rule below.
+    (["mac mini", "imac", "mac pro", "mac studio"], "desktop"),
+    # "mac" matches the literal device name "Mac" and also appears as a
+    # substring of "macos", covering "macOS - Mac" (Happ fallback name).
+    (["macbook", "laptop", "notebook", "mac"], "laptop"),
+    (["windows", "linux", "ubuntu", "debian", "fedora", "arch", "pc", "darwin"], "desktop"),
 ]
 
 # Maps device_type → icon filename.
@@ -101,17 +116,35 @@ def detect_device_type(platform: str | None, device_name: str | None) -> str:
 def resolve_device_type(device) -> str:
     """Return the best-available device type for a Device ORM object.
 
-    Prefers device.device_type when it is present and meaningful.
-    Falls back to detect_device_type() when the stored value is None,
-    empty, or "unknown".
+    Normally prefers device.device_type when it is present and meaningful.
+    Two exceptions override the stored value:
+
+    1. TV always wins.  TV markers ("smart tv", "android tv", " tv", …) are
+       unambiguous.  A device stored as "phone" before TV marker detection
+       was added to the registration path must still display as TV in the
+       cabinet.
+
+    2. Legacy "pc" is re-detected.  "pc" predates the laptop/desktop split.
+       Re-running detect_device_type() picks up the improved classification
+       (e.g. "macOS - Mac" → laptop instead of desktop/pc).  Falls back to
+       "desktop" only when detection yields "unknown".
     """
+    platform = getattr(device, "platform", None)
+    name = getattr(device, "device_name", None)
+    detected = detect_device_type(platform, name)
+
+    if detected == "tv":
+        return "tv"
+
     stored = (device.device_type or "").strip()
+
+    if stored == "pc":
+        return detected if detected != "unknown" else "desktop"
+
     if stored and stored != "unknown":
         return stored
-    return detect_device_type(
-        getattr(device, "platform", None),
-        getattr(device, "device_name", None),
-    )
+
+    return detected if detected != "unknown" else "unknown"
 
 
 def device_type_icon(device_type: str) -> str:

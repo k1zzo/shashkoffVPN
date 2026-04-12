@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from base64 import b64encode
 from urllib.parse import quote
 
 from fastapi import Request
@@ -8,7 +9,13 @@ from backend.config import Settings
 from backend.url_utils import build_app_url
 
 
-def build_vless_url(*, user_uuid: str, settings: Settings) -> str:
+def build_vless_url(
+    *, user_uuid: str, settings: Settings, server_description: str = ""
+) -> str:
+    fragment = "🇳🇱 Нидерланды"
+    if server_description:
+        encoded = b64encode(server_description.encode("utf-8")).decode("ascii")
+        fragment = f"{fragment}?serverDescription={encoded}"
     return (
         f"vless://{user_uuid}@{settings.vpn_server}:{settings.vpn_port}"
         f"?type=tcp"
@@ -18,7 +25,7 @@ def build_vless_url(*, user_uuid: str, settings: Settings) -> str:
         f"&sni={settings.vpn_sni}"
         f"&sid={settings.vpn_reality_short_id}"
         f"&flow=xtls-rprx-vision"
-        "#🇳🇱 Нидерланды"
+        f"#{fragment}"
     )
 
 

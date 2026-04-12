@@ -188,6 +188,14 @@ class TestDetectDeviceType:
     def test_smart_tv_in_name(self):
         assert detect_device_type("Android", "Smart TV Box") == "tv"
 
+    def test_android_smart_tv_pro_is_tv_not_phone(self):
+        # "Smart TV Pro" contains "smart tv" — must win over the generic
+        # "android" → phone rule even though platform is plain "Android".
+        assert detect_device_type("Android", "Smart TV Pro") == "tv"
+
+    def test_android_tv_platform_with_generic_name_is_tv(self):
+        assert detect_device_type("Android TV", "Samsung TV") == "tv"
+
     # ── Tablet ────────────────────────────────────────────────────────────────
     def test_ipad_platform_is_tablet(self):
         assert detect_device_type("iPadOS", "iPad Air") == "tablet"
@@ -215,6 +223,14 @@ class TestDetectDeviceType:
     def test_laptop_keyword_in_name(self):
         assert detect_device_type("Windows", "Dell Laptop") == "laptop"
 
+    def test_macos_mac_is_laptop(self):
+        # "macOS - Mac" is the Happ fallback name when no x-device-model is sent.
+        # Must resolve to laptop, not desktop.
+        assert detect_device_type("macOS", "Mac") == "laptop"
+
+    def test_macos_macbook_air_is_laptop(self):
+        assert detect_device_type("macOS", "MacBook Air") == "laptop"
+
     # ── Desktop ───────────────────────────────────────────────────────────────
     def test_windows_is_desktop(self):
         assert detect_device_type("Windows 11", "DESKTOP-ABC") == "desktop"
@@ -222,8 +238,12 @@ class TestDetectDeviceType:
     def test_linux_is_desktop(self):
         assert detect_device_type("Linux", "Ubuntu PC") == "desktop"
 
-    def test_mac_without_macbook_is_desktop(self):
+    def test_mac_mini_is_desktop(self):
+        # "Mac mini" must resolve to desktop, not laptop.
         assert detect_device_type("macOS", "Mac mini") == "desktop"
+
+    def test_imac_is_desktop(self):
+        assert detect_device_type("macOS", "iMac") == "desktop"
 
     def test_darwin_is_desktop(self):
         assert detect_device_type("darwin", None) == "desktop"
@@ -289,10 +309,23 @@ class TestResolveDeviceType:
         d = self._Device(device_type="", platform="Windows 11", device_name="PC")
         assert resolve_device_type(d) == "desktop"
 
-    def test_legacy_pc_passthrough(self):
-        # "pc" is a valid stored type (pre-split) — must not be treated as unknown
+    def test_legacy_pc_redetects_to_desktop_for_mac_mini(self):
+        # "pc" is re-detected rather than passed through. "macOS - Mac mini"
+        # re-detects as "desktop" (same cabinet icon as the old "pc" alias).
         d = self._Device(device_type="pc", platform="macOS", device_name="Mac mini")
-        assert resolve_device_type(d) == "pc"
+        assert resolve_device_type(d) == "desktop"
+
+    def test_legacy_pc_redetects_to_laptop_for_mac(self):
+        # "macOS - Mac" was stored as "pc" before the laptop/desktop split.
+        # Re-detection now returns "laptop" for the bare "Mac" device name.
+        d = self._Device(device_type="pc", platform="macOS", device_name="Mac")
+        assert resolve_device_type(d) == "laptop"
+
+    def test_tv_wins_over_stored_phone(self):
+        # A device registered before TV markers were checked against the model
+        # may have "phone" stored. TV detection must still win at display time.
+        d = self._Device(device_type="phone", platform="Android", device_name="Smart TV Pro")
+        assert resolve_device_type(d) == "tv"
 
     def test_tv_stored_type_not_overridden_by_platform(self):
         d = self._Device(device_type="tv", platform="Android", device_name="Chromecast")

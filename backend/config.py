@@ -119,6 +119,14 @@ class Settings:
     happ_provider_code: str
     happ_auth_key: str
     happ_api_url: str  # override base URL; defaults to https://happ-proxy.com
+    # When True, send `hide-settings: 1` HTTP header and prepend `#hide-settings: 1`
+    # to the subscription body so Happ hides the server settings UI.
+    # Set HAPP_HIDE_SERVER_SETTINGS=false to disable (default: true).
+    happ_hide_server_settings: bool
+    # When non-empty, embed this text as a base64 `?serverDescription=` param in
+    # the VLESS URL fragment so Happ displays it as the server description.
+    # Set HAPP_SERVER_DESCRIPTION='' to disable. Default: 'SHASHKOFF VPN'.
+    happ_server_description: str
     # ── Xray server-side clients config ──────────────────────────────────────
     # When set, the path where the active Xray clients JSON array is written
     # whenever the device set changes. The file contains only the `clients`
@@ -249,6 +257,10 @@ class Settings:
             happ_provider_code=os.getenv("HAPP_PROVIDER_CODE", ""),
             happ_auth_key=os.getenv("HAPP_AUTH_KEY", ""),
             happ_api_url=os.getenv("HAPP_API_URL", ""),
+            happ_hide_server_settings=os.getenv(
+                "HAPP_HIDE_SERVER_SETTINGS", "true"
+            ).strip().lower() not in ("0", "false", "no"),
+            happ_server_description=os.getenv("HAPP_SERVER_DESCRIPTION", "SHASHKOFF VPN"),
             debug_happ_sub_requests=debug_happ_sub_requests,
             xray_clients_config_path=xray_clients_config_path,
             xray_reload_command=xray_reload_command,

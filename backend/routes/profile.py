@@ -125,7 +125,11 @@ def _build_real_subscription_body(user: User, *, vless_uuid: str | None = None) 
     non-Happ clients working while Happ clients migrate to per-device UUIDs.
     """
     effective_uuid = vless_uuid if vless_uuid else user.uuid
-    return build_vless_url(user_uuid=effective_uuid, settings=settings)
+    return build_vless_url(
+        user_uuid=effective_uuid,
+        settings=settings,
+        server_description=settings.happ_server_description,
+    )
 
 
 def _build_happ_routing_payload() -> dict:
@@ -616,7 +620,6 @@ def build_happ_subscription_response(
         "Access-Control-Allow-Origin": "*",
         "Content-Disposition": f'attachment; filename="user_{user.id}_{user.public_token}"',
         "fallback-url": fallback_url,
-        "hide-settings": "1",
         "mux-enable": "0",
         "notification-subs-expire": "1",
         "profile-title": f"base64:{profile_title}",
@@ -644,6 +647,10 @@ def build_happ_subscription_response(
     # Fallback to user.uuid when x-hwid is absent (non-HWID Happ path).
     vless_uuid: str | None = happ_device.device_uuid if happ_device else None
     body = _build_real_subscription_body(user, vless_uuid=vless_uuid)
+
+    if settings.happ_hide_server_settings:
+        resp_headers["hide-settings"] = "1"
+        body = "#hide-settings: 1\n" + body
 
     return Response(
         content=body,

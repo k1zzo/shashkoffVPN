@@ -157,8 +157,10 @@ def derive_device_type(os: str, model: str) -> str:
         return "pc"
     if "linux" in os_lower:
         return "pc"
-    # TV
-    if "tvos" in os_lower or "android tv" in os_lower:
+    # TV — check model for TV markers BEFORE the generic Android/iOS → phone
+    # fallback so "Android - Smart TV Pro" is not mis-classified as phone.
+    if ("tvos" in os_lower or "android tv" in os_lower
+            or "smart tv" in model_lower or " tv" in model_lower):
         return "tv"
     # Generic iOS without model hint → most likely iPhone
     if "ios" in os_lower:
