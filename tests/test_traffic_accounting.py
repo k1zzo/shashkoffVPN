@@ -71,11 +71,15 @@ class TestUserTrafficFields:
 
 class TestDeletionSnapshot:
     def test_device_traffic_snapshotted_into_user_totals(self, client, db):
-        """Deleting a device must add its Xray traffic to user.traffic_up/down_bytes."""
+        """Deleting a device snapshots ALL of the user's Xray traffic via
+        snapshot_user_traffic_before_reload, which queries with reset=True.
+        The full user total (not just the deleted device) is added to stored.
+        """
         user = _make_user(db, username="snap-user", token="snap-token")
         _make_device(db, user_id=user.id, device_id="device-to-delete")
 
-        device_stats = UserTrafficStats(
+        # Represents total live traffic for this user across all devices.
+        user_stats = UserTrafficStats(
             upload_bytes=30_000_000,
             download_bytes=70_000_000,
             total_bytes=100_000_000,
@@ -89,7 +93,7 @@ class TestDeletionSnapshot:
         )
 
         with patch.object(devices_mod, "settings", patched):
-            with patch("backend.routes.devices.get_device_traffic", return_value=device_stats):
+            with patch("backend.xray_stats.get_user_traffic", return_value=user_stats):
                 resp = client.post(
                     "/api/device/remove",
                     json={"token": "snap-token", "device_id": "device-to-delete"},
@@ -113,7 +117,7 @@ class TestDeletionSnapshot:
         )
 
         with patch.object(devices_mod, "settings", patched):
-            with patch("backend.routes.devices.get_device_traffic", return_value=None):
+            with patch("backend.xray_stats.get_user_traffic", return_value=None):
                 resp = client.post(
                     "/api/device/remove",
                     json={"token": "offline-token", "device_id": "device-offline"},
@@ -137,7 +141,8 @@ class TestDeletionSnapshot:
         )
         _make_device(db, user_id=user.id, device_id="second-device")
 
-        second_stats = UserTrafficStats(
+        # Live stats represent traffic since the last snapshot (reset=True cleared previous).
+        live_stats = UserTrafficStats(
             upload_bytes=5_000_000,
             download_bytes=15_000_000,
             total_bytes=20_000_000,
@@ -151,7 +156,7 @@ class TestDeletionSnapshot:
         )
 
         with patch.object(devices_mod, "settings", patched):
-            with patch("backend.routes.devices.get_device_traffic", return_value=second_stats):
+            with patch("backend.xray_stats.get_user_traffic", return_value=live_stats):
                 resp = client.post(
                     "/api/device/remove",
                     json={"token": "accum-token", "device_id": "second-device"},
@@ -159,8 +164,8 @@ class TestDeletionSnapshot:
 
         assert resp.status_code == 200
         db.refresh(user)
-        assert user.traffic_up_bytes == 15_000_000   # 10M + 5M
-        assert user.traffic_down_bytes == 35_000_000  # 20M + 15M
+        assert user.traffic_up_bytes == 15_000_000   # 10M stored + 5M live
+        assert user.traffic_down_bytes == 35_000_000  # 20M stored + 15M live
 
 
 # ── Cabinet display ───────────────────────────────────────────────────────────

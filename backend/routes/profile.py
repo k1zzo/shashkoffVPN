@@ -24,7 +24,11 @@ from backend.queries import (
 from backend.subscription_utils import build_subscription_url, build_vless_url
 from backend.url_utils import build_app_url
 from backend.xray_clients import apply_xray_client_changes
-from backend.xray_stats import combined_traffic, get_user_traffic_active
+from backend.xray_stats import (
+    combined_traffic,
+    get_user_traffic_active,
+    snapshot_user_traffic_before_reload,
+)
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
@@ -252,6 +256,7 @@ def _build_profile_payload(
             "XRAY-APPLY: reason=new_device device_id=%.24s",
             clean_device_id,
         )
+        snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
         apply_xray_client_changes(db, settings)
     else:
         # Snapshot mutable state BEFORE mutation so change flags are accurate.
@@ -270,6 +275,7 @@ def _build_profile_payload(
                 "XRAY-APPLY: reason=%s device_id=%.24s",
                 reason, clean_device_id,
             )
+            snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
             apply_xray_client_changes(db, settings)
 
         active_device = existing_device
@@ -497,6 +503,7 @@ def build_happ_subscription_response(
                 "XRAY-APPLY: reason=%s token=%.8s device_id=%.24s",
                 result.xray_change_reason(), token, device_info.hwid,
             )
+            snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
             apply_xray_client_changes(db, settings)
     # ─────────────────────────────────────────────────────────────────────────
 

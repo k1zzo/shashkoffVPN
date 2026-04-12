@@ -19,6 +19,17 @@ from backend.models import Device, User
 
 _MSK = timezone(timedelta(hours=3))
 
+_RU_MONTHS_GEN = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+
+def _ru_date(dt_utc) -> str:
+    """Return the Russian-format expiry string for a naive UTC datetime."""
+    msk = dt_utc.replace(tzinfo=timezone.utc).astimezone(_MSK)
+    return f"{msk.day} {_RU_MONTHS_GEN[msk.month - 1]}, {msk.year}"
+
 
 def _utc(year, month, day, hour=0, minute=0):
     return datetime(year, month, day, hour, minute)
@@ -70,8 +81,8 @@ class TestDeviceLastSeenMoscowTime:
 
         resp = client.get("/msk-token")
         assert resp.status_code == 200
-        # 21:00 UTC = 00:00 MSK April 10
-        assert "2025-04-10 00:00:00" in resp.text
+        # 21:00 UTC = 00:00 MSK April 10 — new format: DD.MM.YYYY, HH:MM:SS
+        assert "10.04.2025, 00:00:00" in resp.text
 
     def test_last_seen_not_shown_as_utc(self, client, db):
         """Raw UTC timestamp must not appear in the cabinet when MSK differs."""
@@ -82,8 +93,8 @@ class TestDeviceLastSeenMoscowTime:
 
         resp = client.get("/msk-utc-token")
         assert resp.status_code == 200
-        # UTC value must not appear
-        assert "2025-04-09 21:00:00" not in resp.text
+        # UTC value in the new format must not appear (MSK shifts the date to April 10)
+        assert "09.04.2025, 21:00:00" not in resp.text
 
     def test_last_seen_midday_utc_stays_same_date_in_msk(self, client, db):
         """12:00 UTC = 15:00 MSK same day — date must not shift."""
@@ -94,7 +105,7 @@ class TestDeviceLastSeenMoscowTime:
 
         resp = client.get("/msk-noon-token")
         assert resp.status_code == 200
-        assert "2025-06-15 15:00:00" in resp.text
+        assert "15.06.2025, 15:00:00" in resp.text
 
 
 # ── Moscow-time expiry date ───────────────────────────────────────────────────
@@ -110,8 +121,8 @@ class TestExpiriesAtMoscowTime:
         resp = client.get("/exp-msk-token")
         assert resp.status_code == 200
         # Cabinet must show April 10 (MSK), not April 9 (UTC)
-        assert "10.04.2025" in resp.text
-        assert "09.04.2025" not in resp.text
+        assert "10 апреля, 2025" in resp.text
+        assert "9 апреля, 2025" not in resp.text
 
     def test_expiry_same_day_for_utc_midnight(self, client, db):
         """expires_at = 00:00 UTC = 03:00 MSK same day → cabinet shows same date."""
@@ -121,7 +132,7 @@ class TestExpiriesAtMoscowTime:
         resp = client.get("/exp-midnight-token")
         assert resp.status_code == 200
         # 00:00 UTC = 03:00 MSK same calendar day
-        assert "20.07.2025" in resp.text
+        assert "20 июля, 2025" in resp.text
 
     def test_expiry_none_shows_never(self, client, db):
         """Users with no expiry must show 'Never', not a date."""
@@ -145,15 +156,8 @@ class TestExpiriesAtMoscowTime:
 
         resp = client.get("/ts-match-token")
         assert resp.status_code == 200
-
-        # The Unix timestamp Happ uses:
-        import calendar
-        expected_ts = calendar.timegm(expires_utc.timetuple())
-        # MSK date for that timestamp:
-        msk_dt = datetime.fromtimestamp(expected_ts, tz=_MSK)
-        expected_date_str = msk_dt.strftime("%d.%m.%Y")
-
-        assert expected_date_str in resp.text
+        # Russian-format MSK date for this timestamp: "10 апреля, 2025"
+        assert _ru_date(expires_utc) in resp.text
 
 
 # ── Happ deep-link button attributes ─────────────────────────────────────────
@@ -209,14 +213,18 @@ class TestDeviceTitleAndIcon:
         assert "iOS - iPhone 15" in resp.text
 
     def test_local_icon_path_in_html(self, client, db):
-        """Cabinet must reference the local SVG path, not a CDN URL."""
+        """Cabinet must reference the local device-type SVG path, not a CDN URL.
+
+        An iPhone 15 (platform='iOS', device_name='iPhone 15', no stored
+        device_type) resolves to 'phone' via the heuristic → phone.svg.
+        """
         user = _make_user(db, username="icon-path-user", token="icon-path-token",
                           expires_at=_utc(2099, 12, 31))
         self._make_ios_device(db, user.id)
 
         resp = client.get("/icon-path-token")
         assert resp.status_code == 200
-        assert "/static/icons/ios.svg" in resp.text
+        assert "/static/icons/phone.svg" in resp.text
 
     def test_no_cdn_urls_in_html(self, client, db):
         """Cabinet must not reference any Wikipedia/CDN URLs for device icons."""

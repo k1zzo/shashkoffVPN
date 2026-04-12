@@ -215,8 +215,12 @@ def _call_query_stats(
     addr: str,
     pattern: str,
     timeout: float,
+    reset: bool = False,
 ) -> list[tuple[str, int]] | None:
     """Send a QueryStats gRPC request to Xray; return parsed stats or None.
+
+    reset=True passes the reset flag to Xray, which atomically reads and
+    clears the matched counters in a single call.
 
     Returns None on any error (connection refused, timeout, bad response, …).
     Imports grpcio lazily so the module loads without it installed.
@@ -236,7 +240,7 @@ def _call_query_stats(
             request_serializer=lambda x: x,   # request is already bytes
             response_deserializer=lambda x: x,  # return raw protobuf bytes
         )
-        request_bytes = encode_query_stats_request(pattern=pattern, reset=False)
+        request_bytes = encode_query_stats_request(pattern=pattern, reset=reset)
         response_bytes = method(request_bytes, timeout=timeout)
         return decode_query_stats_response(response_bytes)
     except Exception as exc:
@@ -254,8 +258,17 @@ def get_user_traffic(
     username: str,
     xray_api_addr: str,
     timeout: float = 3.0,
+    reset: bool = False,
 ) -> UserTrafficStats | None:
     """Query Xray for total traffic used by a user across all their devices.
+
+    reset=True: atomically reads AND clears Xray's in-memory counters for
+      this user in a single gRPC call.  Use before any operation that will
+      trigger a Xray reload (which resets counters anyway) to ensure the
+      values are captured in the DB before they disappear.  Safe to use
+      regardless of whether the subsequent reload actually resets stats —
+      the counter is already 0 after this call, so no double-counting can
+      occur when combined_traffic() is called next.
 
     Returns None when:
       - xray_api_addr is empty
@@ -274,7 +287,7 @@ def get_user_traffic(
         return None
 
     pattern = f"user>>>{username}/"
-    raw = _call_query_stats(addr=xray_api_addr, pattern=pattern, timeout=timeout)
+    raw = _call_query_stats(addr=xray_api_addr, pattern=pattern, timeout=timeout, reset=reset)
     if raw is None:
         return None
 
@@ -349,6 +362,56 @@ def get_user_traffic_active(
         download_bytes=download,
         total_bytes=upload + download,
     )
+
+
+def snapshot_user_traffic_before_reload(
+    db,
+    user,
+    xray_api_addr: str | None,
+    timeout: float = 3.0,
+) -> bool:
+    """Atomically capture all of a user's Xray traffic and persist it to the DB.
+
+    Queries Xray with reset=True, which reads AND clears every stat counter
+    matching "user>>>{username}/" in a single gRPC call.  The returned values
+    are added to user.traffic_up_bytes / traffic_down_bytes and committed.
+
+    Call this BEFORE apply_xray_client_changes() on any path that triggers a
+    Xray reload.  Xray's systemctl reload (SIGHUP) reinitialises the stats
+    manager and resets all in-memory counters to zero — this function ensures
+    those values are captured in the DB before the reset happens.
+
+    Using reset=True rather than a plain read prevents double-counting: the
+    counter is zeroed here, so whether or not the subsequent Xray reload also
+    resets counters, the value is stored exactly once.
+
+    Returns True if a snapshot was taken and committed, False otherwise
+    (Xray unreachable, not configured, or zero traffic — all safe to ignore).
+    """
+    if not xray_api_addr:
+        return False
+
+    username = getattr(user, "username", None)
+    if not username:
+        return False
+
+    snapshot = get_user_traffic(
+        username=username,
+        xray_api_addr=xray_api_addr,
+        timeout=timeout,
+        reset=True,
+    )
+    if snapshot is None or snapshot.total_bytes == 0:
+        return False
+
+    user.traffic_up_bytes = (user.traffic_up_bytes or 0) + snapshot.upload_bytes
+    user.traffic_down_bytes = (user.traffic_down_bytes or 0) + snapshot.download_bytes
+    db.commit()
+    logger.info(
+        "xray_stats: snapshotted user=%s up=%d down=%d before Xray reload",
+        username, snapshot.upload_bytes, snapshot.download_bytes,
+    )
+    return True
 
 
 def get_device_traffic(

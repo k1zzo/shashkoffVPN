@@ -4,9 +4,12 @@ from __future__ import annotations
 import pytest
 
 from backend.platform_utils import (
+    detect_device_type,
+    device_type_icon,
     format_device_title,
     normalize_platform,
     platform_icon,
+    resolve_device_type,
 )
 
 
@@ -172,3 +175,125 @@ class TestFormatDeviceTitle:
 
     def test_unknown_platform_uppercased_in_title(self):
         assert format_device_title("BeOS", "Box") == "BEOS - Box"
+
+
+class TestDetectDeviceType:
+    # ── TV must fire before Android ───────────────────────────────────────────
+    def test_android_tv_platform_is_tv_not_phone(self):
+        assert detect_device_type("Android TV", "Samsung Smart TV") == "tv"
+
+    def test_tvos_is_tv(self):
+        assert detect_device_type("tvOS", "Apple TV") == "tv"
+
+    def test_smart_tv_in_name(self):
+        assert detect_device_type("Android", "Smart TV Box") == "tv"
+
+    # ── Tablet ────────────────────────────────────────────────────────────────
+    def test_ipad_platform_is_tablet(self):
+        assert detect_device_type("iPadOS", "iPad Air") == "tablet"
+
+    def test_tablet_keyword_in_name(self):
+        assert detect_device_type("Android", "Samsung Galaxy Tablet") == "tablet"
+
+    # ── Phone ─────────────────────────────────────────────────────────────────
+    def test_iphone_in_name_is_phone(self):
+        assert detect_device_type("iOS", "iPhone 15 Pro") == "phone"
+
+    def test_android_plain_is_phone(self):
+        assert detect_device_type("Android 13", "Pixel 7") == "phone"
+
+    def test_galaxy_in_name_is_phone(self):
+        assert detect_device_type("Android", "Samsung Galaxy S24") == "phone"
+
+    def test_mobile_keyword_is_phone(self):
+        assert detect_device_type("Mobile", "Generic Phone") == "phone"
+
+    # ── Laptop ────────────────────────────────────────────────────────────────
+    def test_macbook_in_name_is_laptop(self):
+        assert detect_device_type("macOS", "MacBook Pro") == "laptop"
+
+    def test_laptop_keyword_in_name(self):
+        assert detect_device_type("Windows", "Dell Laptop") == "laptop"
+
+    # ── Desktop ───────────────────────────────────────────────────────────────
+    def test_windows_is_desktop(self):
+        assert detect_device_type("Windows 11", "DESKTOP-ABC") == "desktop"
+
+    def test_linux_is_desktop(self):
+        assert detect_device_type("Linux", "Ubuntu PC") == "desktop"
+
+    def test_mac_without_macbook_is_desktop(self):
+        assert detect_device_type("macOS", "Mac mini") == "desktop"
+
+    def test_darwin_is_desktop(self):
+        assert detect_device_type("darwin", None) == "desktop"
+
+    # ── Unknown ───────────────────────────────────────────────────────────────
+    def test_none_both_is_unknown(self):
+        assert detect_device_type(None, None) == "unknown"
+
+    def test_empty_strings_is_unknown(self):
+        assert detect_device_type("", "") == "unknown"
+
+    def test_unrecognised_platform_is_unknown(self):
+        assert detect_device_type("BeOS", "Workstation X") == "unknown"
+
+
+class TestDeviceTypeIcon:
+    def test_phone(self):
+        assert device_type_icon("phone") == "phone.svg"
+
+    def test_tablet(self):
+        assert device_type_icon("tablet") == "tablet.svg"
+
+    def test_laptop(self):
+        assert device_type_icon("laptop") == "laptop.svg"
+
+    def test_desktop(self):
+        assert device_type_icon("desktop") == "desktop.svg"
+
+    def test_tv(self):
+        assert device_type_icon("tv") == "tv.svg"
+
+    def test_legacy_pc_aliases_to_desktop(self):
+        assert device_type_icon("pc") == "desktop.svg"
+
+    def test_unknown_type_returns_unknown_svg(self):
+        assert device_type_icon("unknown") == "unknown.svg"
+
+    def test_empty_string_returns_unknown_svg(self):
+        assert device_type_icon("") == "unknown.svg"
+
+
+class TestResolveDeviceType:
+    class _Device:
+        """Minimal stand-in for the Device ORM object."""
+        def __init__(self, device_type, platform=None, device_name=None):
+            self.device_type = device_type
+            self.platform = platform
+            self.device_name = device_name
+
+    def test_uses_stored_device_type_when_present(self):
+        d = self._Device(device_type="tablet", platform="Android", device_name="Galaxy Tab")
+        assert resolve_device_type(d) == "tablet"
+
+    def test_falls_back_when_device_type_is_none(self):
+        d = self._Device(device_type=None, platform="iOS", device_name="iPhone 15")
+        assert resolve_device_type(d) == "phone"
+
+    def test_falls_back_when_device_type_is_unknown(self):
+        d = self._Device(device_type="unknown", platform="macOS", device_name="MacBook Air")
+        assert resolve_device_type(d) == "laptop"
+
+    def test_falls_back_when_device_type_is_empty_string(self):
+        d = self._Device(device_type="", platform="Windows 11", device_name="PC")
+        assert resolve_device_type(d) == "desktop"
+
+    def test_legacy_pc_passthrough(self):
+        # "pc" is a valid stored type (pre-split) — must not be treated as unknown
+        d = self._Device(device_type="pc", platform="macOS", device_name="Mac mini")
+        assert resolve_device_type(d) == "pc"
+
+    def test_tv_stored_type_not_overridden_by_platform(self):
+        d = self._Device(device_type="tv", platform="Android", device_name="Chromecast")
+        assert resolve_device_type(d) == "tv"

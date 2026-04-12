@@ -21,7 +21,7 @@ from backend.queries import (
     is_user_accessible,
 )
 from backend.xray_clients import apply_xray_client_changes
-from backend.xray_stats import get_device_traffic
+from backend.xray_stats import snapshot_user_traffic_before_reload
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -94,6 +94,7 @@ def register_device(
                 "XRAY-APPLY: reason=%s token=%.8s device_id=%.24s",
                 reason, token, device_id,
             )
+            snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
             apply_xray_client_changes(db, settings)
 
         return JSONResponse(
@@ -127,6 +128,7 @@ def register_device(
         "XRAY-APPLY: reason=new_device token=%.8s device_id=%.24s",
         token, device_id,
     )
+    snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
     apply_xray_client_changes(db, settings)
 
     return JSONResponse(
@@ -165,24 +167,23 @@ def remove_device(
         return JSONResponse(status_code=404, content={"detail": "Device not found"})
 
     # ── Traffic snapshot ──────────────────────────────────────────────────────
-    # Before deactivating, capture this device's current Xray traffic counter
-    # and add it to the user's persistent stored totals.  This ensures the
-    # user's cumulative total never decreases when a device is removed, even
-    # after Xray resets its in-memory counters on restart.
+    # Capture ALL of this user's current Xray traffic before the reload that
+    # follows device removal.  `systemctl reload xray` (SIGHUP) reinitialises
+    # Xray's stats manager and resets every in-memory counter to zero.  The
+    # old code only snapshotted the device being deleted; all other active
+    # devices' accumulated traffic was silently destroyed on each reload.
     #
-    # If Xray is unreachable, we proceed with deletion and accept that the
-    # device's final traffic is not captured — honest limitation, not a crash.
-    if settings.xray_api_addr:
-        device_label = (device.device_id or "")[:24]
-        _snapshot = get_device_traffic(
-            username=user.username,
-            device_label=device_label,
-            xray_api_addr=settings.xray_api_addr,
-        )
-        if _snapshot is not None and _snapshot.total_bytes > 0:
-            user.traffic_up_bytes = (user.traffic_up_bytes or 0) + _snapshot.upload_bytes
-            user.traffic_down_bytes = (user.traffic_down_bytes or 0) + _snapshot.download_bytes
-            db.commit()
+    # snapshot_user_traffic_before_reload() uses reset=True so Xray's counters
+    # are zeroed atomically by the query itself — no double-counting regardless
+    # of whether the subsequent reload also resets them.
+    #
+    # If Xray is unreachable, we proceed and accept that the pre-reload traffic
+    # is not captured for this cycle — honest limitation, not a crash.
+    snapshot_user_traffic_before_reload(
+        db=db,
+        user=user,
+        xray_api_addr=settings.xray_api_addr,
+    )
     # ─────────────────────────────────────────────────────────────────────────
 
     deactivate_device(db, device)

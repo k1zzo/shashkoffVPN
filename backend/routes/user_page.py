@@ -6,7 +6,11 @@ from sqlalchemy.orm import Session
 from backend import happ_limited_links
 from backend.config import get_settings
 from backend.db import get_db
-from backend.platform_utils import format_device_title, platform_icon
+from backend.platform_utils import (
+    device_type_icon,
+    format_device_title,
+    resolve_device_type,
+)
 from backend.queries import (
     count_active_devices,
     get_user_by_token,
@@ -28,19 +32,30 @@ settings = get_settings()
 # Moscow Standard Time — UTC+3, no DST (Russia abolished DST in 2014).
 _MSK = timezone(timedelta(hours=3))
 
+# Russian month names in genitive case (used after a day number: "12 апреля").
+_RU_MONTHS_GEN = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
 
 def _fmt_msk_datetime(dt) -> str:
-    """Format a naive UTC datetime as Moscow local time: YYYY-MM-DD HH:MM:SS."""
+    """Format a naive UTC datetime as Moscow local time: DD.MM.YYYY, HH:MM:SS."""
     if dt is None:
         return "Never"
-    return dt.replace(tzinfo=timezone.utc).astimezone(_MSK).strftime("%Y-%m-%d %H:%M:%S")
+    msk = dt.replace(tzinfo=timezone.utc).astimezone(_MSK)
+    return msk.strftime("%d.%m.%Y, %H:%M:%S")
 
 
 def _fmt_msk_date(dt) -> str:
-    """Format a naive UTC datetime as a Moscow local date: DD.MM.YYYY."""
+    """Format a naive UTC datetime as a Russian-language Moscow local date.
+
+    Output: '<day> <month_genitive>, <year>' — e.g. '11 мая, 2026'.
+    """
     if dt is None:
         return "Never"
-    return dt.replace(tzinfo=timezone.utc).astimezone(_MSK).strftime("%d.%m.%Y")
+    msk = dt.replace(tzinfo=timezone.utc).astimezone(_MSK)
+    return f"{msk.day} {_RU_MONTHS_GEN[msk.month - 1]}, {msk.year}"
 
 
 @router.get("/{token}")
@@ -184,7 +199,7 @@ def render_user_page(
                     "platform": device.platform,
                     "last_seen_at": _fmt_msk_datetime(device.last_seen_at),
                     "device_title": format_device_title(device.platform, device.device_name),
-                    "icon": platform_icon(device.platform),
+                    "icon": device_type_icon(resolve_device_type(device)),
                 }
                 for device in device_rows
             ],
