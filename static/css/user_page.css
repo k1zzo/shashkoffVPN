@@ -27,7 +27,7 @@
 :root {
   --bg-color: #070b1a;
   --panel-bg: rgba(22, 32, 60, 0.4);
-  --card-bg: rgba(30, 42, 75, 0.5);
+  --card-bg: rgba(255, 255, 255, 0.03);
   --border-glow: rgba(94, 226, 255, 0.15);
   --border-light: rgba(255, 255, 255, 0.1);
   --text-main: #ffffff;
@@ -39,18 +39,25 @@
 
 body {
   margin: 0;
-  padding: 40px 20px;
   background-color: var(--bg-color);
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 50px 50px;
+  background-attachment: fixed;
   color: var(--text-main);
   font-family: var(--font-family);
   display: flex;
-  justify-content: center;
-  align-items: flex-start;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
   min-height: 100vh;
   box-sizing: border-box;
   position: relative;
   isolation: isolate;
-  overflow-x: hidden;
+  /* clip, not hidden — overflow: hidden creates a scroll container and
+     breaks position: sticky on child elements */
+  overflow-x: clip;
 }
 
 body::before {
@@ -60,26 +67,15 @@ body::before {
   z-index: 0;
   pointer-events: none;
   background:
-    radial-gradient(58% 56% at 16% 20%, rgba(40, 108, 255, 0.28), transparent 72%),
-    radial-gradient(48% 46% at 84% 24%, rgba(80, 225, 255, 0.2), transparent 70%),
-    radial-gradient(64% 62% at 52% 88%, rgba(88, 72, 255, 0.2), transparent 76%);
+    radial-gradient(58% 56% at 16% 20%, rgba(40, 108, 255, 0.15), transparent 72%),
+    radial-gradient(48% 46% at 84% 24%, rgba(80, 225, 255, 0.12), transparent 70%),
+    radial-gradient(64% 62% at 52% 88%, rgba(88, 72, 255, 0.12), transparent 76%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, transparent 200px, black 400px);
+  mask-image: linear-gradient(to bottom, transparent 0, transparent 200px, black 400px);
   transform: translate3d(0, 0, 0) scale(1);
   transform-origin: center;
   will-change: transform;
   animation: background-glow-drift 26s ease-in-out infinite alternate;
-}
-
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-  background-size: 40px 40px;
-  opacity: 0.95;
 }
 
 @keyframes background-glow-drift {
@@ -105,11 +101,25 @@ body::after {
   max-width: 780px;
   position: relative;
   z-index: 2;
+  padding: 0 20px 40px;
 }
 
-/* Заголовок вне рамки */
 .header {
-  margin-bottom: 20px;
+  position: sticky;
+  top: 0;
+  /* Paints above .app-wrapper content when scrolled under */
+  z-index: 10;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto 30px;
+  padding: 15px 24px;
+  background: #070b1acc;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom-left-radius: 16px;
+  border-bottom-right-radius: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
 }
 
 .brand {
@@ -334,8 +344,12 @@ body::after {
   /* 2 * pi * r (r=64) ≈ 402 */
   stroke-dashoffset: var(--ring-offset, 402);
   stroke-linecap: round;
-  filter: drop-shadow(0 0 6px var(--accent-cyan));
+  /* transition handles JS-driven updates (device removal etc.) */
   transition: stroke-dashoffset 0.35s ease;
+  /* ring-enter animates from empty (402) to the server-rendered --ring-offset
+     value on page load.  Uses backwards fill so the ring stays empty during
+     the delay, then the implicit "to" resolves to the computed property value. */
+  animation: ring-enter 0.80s cubic-bezier(0.4, 0, 0.2, 1) 0.35s backwards;
 }
 
 .progress-text {
@@ -362,7 +376,7 @@ body::after {
 
 .btn {
   flex: 1;
-  background: rgba(30, 42, 75, 0.6);
+  background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border-light);
   border-radius: 8px;
   padding: 12px 0;
@@ -381,7 +395,7 @@ body::after {
 }
 
 .btn:hover {
-  background: rgba(45, 60, 100, 0.8);
+  background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.2);
   box-shadow: 0 0 15px rgba(94, 226, 255, 0.1);
 }
@@ -479,7 +493,7 @@ body::after {
 }
 
 .device-item {
-  background: rgba(20, 28, 50, 0.6);
+  background: rgba(255, 255, 255, 0.02);
   border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: 12px;
   padding: 12px 16px;
@@ -488,6 +502,14 @@ body::after {
   justify-content: space-between;
   gap: 12px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.device-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.10);
 }
 
 .device-main {
@@ -573,9 +595,6 @@ body::after {
 
 /* <= 1024px */
 @media (max-width: 1024px) {
-  body {
-    padding: 32px 16px;
-  }
 
   .dashboard-panel {
     gap: 18px;
@@ -596,17 +615,14 @@ body::after {
 
 /* <= 768px */
 @media (max-width: 768px) {
-  body {
-    padding: 24px 14px;
-  }
 
-  body::after {
-    background-size: 46px 46px;
-    opacity: 0.72;
+  body {
+    background-size: 50px 50px;
   }
 
   .header {
-    margin-bottom: 16px;
+    margin-bottom: 30px;
+    border-radius: 0px;
   }
 
   .brand {
@@ -691,17 +707,13 @@ body::after {
 
 /* <= 560px */
 @media (max-width: 560px) {
-  body {
-    padding: 18px 12px;
-  }
 
   body::before {
     inset: -28%;
   }
 
-  body::after {
-    background-size: 42px 42px;
-    opacity: 0.62;
+  body {
+    background-size: 50px 50px;
   }
 
   .app-wrapper {
@@ -709,7 +721,7 @@ body::after {
   }
 
   .header {
-    margin-bottom: 14px;
+    margin-bottom: 30px;
   }
 
   .brand {
@@ -809,12 +821,9 @@ body::after {
 
 /* <= 420px */
 @media (max-width: 420px) {
-  body {
-    padding: 14px 10px;
-  }
 
   .header {
-    margin-bottom: 12px;
+    margin-bottom: 30px;
   }
 
   .brand-logo {
@@ -896,5 +905,146 @@ body::after {
 
   .device-activity {
     font-size: 10px;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PAGE ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Keyframes ────────────────────────────────────────────────────────────── */
+
+/* Entrance: fade in while rising 10 px. Used by cards, rows, and sections. */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Ring fill on load.  The `from` is the empty state (full offset = 402).
+   No explicit `to` — the browser resolves the implicit target from the
+   element's own computed stroke-dashoffset (var(--ring-offset)).  This lets
+   the animation drive from "empty" to whatever value the server rendered,
+   without needing JS or a registered @property. */
+@keyframes ring-enter {
+  from {
+    stroke-dashoffset: 402;
+  }
+}
+
+/* Gentle glow-breath for the active status dot (separate from the ::after
+   ripple ring).  Very slow cycle — should feel ambient, not distracting. */
+@keyframes status-dot-breath {
+
+  /* 0%/100% exactly match .status-indicator.is-active's base box-shadow
+     so there is no visible jump when the animation begins or loops. */
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(52, 199, 89, 0.20),
+      0 0 8px rgba(52, 199, 89, 0.45);
+  }
+
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(52, 199, 89, 0.32),
+      0 0 14px rgba(52, 199, 89, 0.68);
+  }
+}
+
+/* ── Entrance animations (skip when user prefers reduced motion) ─────────── */
+
+@media (prefers-reduced-motion: no-preference) {
+
+  /* Stat cards — 60 ms stagger */
+  .stats-grid>.stat-card {
+    animation: fade-up 0.38s ease both;
+  }
+
+  .stats-grid>.stat-card:nth-child(1) {
+    animation-delay: 0.04s;
+  }
+
+  .stats-grid>.stat-card:nth-child(2) {
+    animation-delay: 0.10s;
+  }
+
+  .stats-grid>.stat-card:nth-child(3) {
+    animation-delay: 0.16s;
+  }
+
+  .stats-grid>.stat-card:nth-child(4) {
+    animation-delay: 0.22s;
+  }
+
+  /* Subscription card arrives just after the last stat card */
+  .subscription-card {
+    animation: fade-up 0.38s ease 0.26s both;
+  }
+
+  /* Devices section follows the subscription card */
+  .devices-section {
+    animation: fade-up 0.38s ease 0.30s both;
+  }
+
+  /* Device rows — stagger inside the open list */
+  .devices-list>.device-item {
+    animation: fade-up 0.32s ease both;
+  }
+
+  .devices-list>.device-item:nth-child(1) {
+    animation-delay: 0.38s;
+  }
+
+  .devices-list>.device-item:nth-child(2) {
+    animation-delay: 0.44s;
+  }
+
+  .devices-list>.device-item:nth-child(3) {
+    animation-delay: 0.50s;
+  }
+
+  .devices-list>.device-item:nth-child(4) {
+    animation-delay: 0.56s;
+  }
+
+  .devices-list>.device-item:nth-child(5) {
+    animation-delay: 0.60s;
+  }
+
+  .devices-list>.device-item:nth-child(6) {
+    animation-delay: 0.64s;
+  }
+
+  /* Items beyond 6 share the last delay so they don't feel forgotten */
+  .devices-list>.device-item:nth-child(n+7) {
+    animation-delay: 0.67s;
+  }
+
+  /* Active status dot — soft glow breath */
+  .status-indicator.is-active {
+    animation: status-dot-breath 2.4s ease-in-out infinite;
+  }
+}
+
+/* ── Reduced-motion overrides ────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+
+  /* Freeze the background gradient drift */
+  body::before {
+    animation: none;
+  }
+
+  /* ring-enter was applied inside no-preference, but guard here too in case
+     of future refactors that move it outside the media query */
+  .progress-ring-value {
+    animation: none;
   }
 }
