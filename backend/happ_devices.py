@@ -18,7 +18,7 @@ Key invariants:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import Request
@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.models import Device
+from backend.platform_utils import detect_device_type  # Fix G: unified device type classifier
 
 
 @dataclass(frozen=True)
@@ -205,7 +206,11 @@ def register_or_update_happ_device(
     )
 
     name = derive_device_name(device_info.os, device_info.model)
-    device_type = derive_device_type(device_info.os, device_info.model)
+    # Fix G: use detect_device_type from platform_utils so stored device_type
+    # matches what resolve_device_type() would compute at render time.
+    # derive_device_type() returned legacy "pc"; detect_device_type() returns
+    # the finer-grained "laptop"/"desktop" split, eliminating the immediate mismatch.
+    device_type = detect_device_type(device_info.os, name)
     platform = device_info.os if device_info.os else "unknown"
 
     if existing is not None:

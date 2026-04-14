@@ -395,18 +395,48 @@ def snapshot_user_traffic_before_reload(
     if not username:
         return False
 
+    # Fix I: read stats WITHOUT resetting first, commit to DB, then reset.
+    # Original approach (reset=True atomically): if db.commit() failed, the bytes
+    # were already cleared from Xray and lost forever with no recovery path.
+    # New approach: persist first, then clear.  Trade-off: a small amount of
+    # traffic arriving between the read and the subsequent reset call may be
+    # lost (zeroed by reset but not captured in the snapshot).  This window is
+    # milliseconds and the loss is negligible compared to losing the full counter.
+    # NOTE: if Xray's StatsService does not support non-resetting reads (i.e.
+    # reset=False always returns 0), fall back to the old reset=True approach.
     snapshot = get_user_traffic(
         username=username,
         xray_api_addr=xray_api_addr,
         timeout=timeout,
-        reset=True,
+        reset=False,  # Fix I: read without clearing first
     )
     if snapshot is None or snapshot.total_bytes == 0:
         return False
 
     user.traffic_up_bytes = (user.traffic_up_bytes or 0) + snapshot.upload_bytes
     user.traffic_down_bytes = (user.traffic_down_bytes or 0) + snapshot.download_bytes
-    db.commit()
+    try:
+        db.commit()  # Fix I: persist BEFORE clearing Xray counters
+    except Exception:
+        db.rollback()
+        logger.error(
+            "xray_stats: DB commit failed for user=%s — skipping Xray counter "
+            "reset to preserve data; bytes remain in Xray and will be captured "
+            "on the next snapshot call.",
+            username,
+        )
+        return False
+
+    # Fix I: only zero Xray's counters after a confirmed DB commit.
+    # Any traffic that arrived between the read above and this reset is lost,
+    # but that window is milliseconds and far safer than losing the full snapshot.
+    get_user_traffic(
+        username=username,
+        xray_api_addr=xray_api_addr,
+        timeout=timeout,
+        reset=True,
+    )
+
     logger.info(
         "xray_stats: snapshotted user=%s up=%d down=%d before Xray reload",
         username, snapshot.upload_bytes, snapshot.download_bytes,

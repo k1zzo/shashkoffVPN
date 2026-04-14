@@ -4,303 +4,40 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#070b1a">
   <title>SHASHKOFF VPN</title>
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-    @font-face {
-      font-family: 'FiraMonoCustom';
-      src: url('/static/fonts/FiraMono-Regular.ttf') format('truetype');
-      font-weight: 400;
-      font-style: normal;
-      font-display: swap;
-    }
-
-    @font-face {
-      font-family: 'FiraMonoCustom';
-      src: url('/static/fonts/FiraMono-Medium.ttf') format('truetype');
-      font-weight: 500;
-      font-style: normal;
-      font-display: swap;
-    }
-
-    @font-face {
-      font-family: 'FiraMonoCustom';
-      src: url('/static/fonts/FiraMono-Bold.ttf') format('truetype');
-      font-weight: 700;
-      font-style: normal;
-      font-display: swap;
-    }
-
-    :root {
-      --bg-color: #070b1a;
-      --card-bg: rgba(30, 42, 75, 0.5);
-      --border-light: rgba(255, 255, 255, 0.1);
-      --text-main: #ffffff;
-      --text-muted: #9ba4b5;
-      --accent-cyan: #5ee2ff;
-      --font-family: 'FiraMonoCustom', 'Inter', sans-serif;
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-
-    body {
-      background-color: var(--bg-color);
-      color: var(--text-main);
-      font-family: var(--font-family);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-      padding: 40px 20px;
-      position: relative;
-      isolation: isolate;
-      overflow-x: hidden;
-    }
-
-    body::before {
-      content: "";
-      position: fixed;
-      inset: -18%;
-      z-index: 0;
-      pointer-events: none;
-      background:
-        radial-gradient(58% 56% at 16% 20%, rgba(40, 108, 255, 0.28), transparent 72%),
-        radial-gradient(48% 46% at 84% 24%, rgba(80, 225, 255, 0.2), transparent 70%),
-        radial-gradient(64% 62% at 52% 88%, rgba(88, 72, 255, 0.2), transparent 76%);
-      transform: translate3d(0, 0, 0) scale(1);
-      transform-origin: center;
-      will-change: transform;
-      animation: bg-drift 26s ease-in-out infinite alternate;
-    }
-
-    body::after {
-      content: "";
-      position: fixed;
-      inset: 0;
-      z-index: 1;
-      pointer-events: none;
-      background-image:
-        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-      background-size: 40px 40px;
-      opacity: 0.95;
-    }
-
-    @keyframes bg-drift {
-      0% { transform: translate3d(-2%, -1.5%, 0) scale(1); }
-      50% { transform: translate3d(2%, 1.2%, 0) scale(1.04); }
-      100% { transform: translate3d(-1%, 2%, 0) scale(1.02); }
-    }
-
-    .error-wrapper {
-      width: 100%;
-      max-width: 480px;
-      position: relative;
-      z-index: 2;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }
-
-    /* Brand header */
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 28px;
-    }
-
-    .brand-logo {
-      width: 38px;
-      height: 44px;
-      display: block;
-      flex-shrink: 0;
-      object-fit: cover;
-      object-position: center;
-    }
-
-    .brand-text {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .brand-title {
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      color: #f1f3f6;
-      line-height: 1.1;
-    }
-
-    .brand-subtitle {
-      font-size: 14px;
-      color: var(--text-muted);
-      line-height: 1.2;
-    }
-
-    /* Error card */
-    .error-card {
-      width: 100%;
-      background: var(--card-bg);
-      border: 1px solid var(--border-light);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      border-radius: 16px;
-      padding: 32px 28px;
-      text-align: center;
-      position: relative;
-      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05);
-    }
-
-    .error-card::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(94, 226, 255, 0.3), transparent);
-    }
-
-    /* Shield icon */
-    .error-icon {
-      width: 56px;
-      height: 56px;
-      margin: 0 auto 20px;
-      border-radius: 50%;
-      background: rgba(94, 226, 255, 0.06);
-      border: 1px solid rgba(94, 226, 255, 0.15);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 0 24px rgba(94, 226, 255, 0.08);
-    }
-
-    .error-icon svg {
-      width: 26px;
-      height: 26px;
-      color: var(--accent-cyan);
-      opacity: 0.8;
-    }
-
-    .error-title {
-      font-size: 18px;
-      font-weight: 600;
-      margin-bottom: 10px;
-      color: var(--text-main);
-    }
-
-    .error-message {
-      font-size: 14px;
-      color: var(--text-muted);
-      line-height: 1.5;
-      margin-bottom: 24px;
-    }
-
-    .error-hint {
-      font-size: 12px;
-      color: rgba(155, 164, 181, 0.6);
-      line-height: 1.4;
-    }
-
-    .error-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      background: rgba(30, 42, 75, 0.6);
-      border: 1px solid var(--border-light);
-      border-radius: 8px;
-      padding: 11px 24px;
-      color: var(--text-main);
-      font-size: 14px;
-      font-weight: 500;
-      font-family: var(--font-family);
-      cursor: pointer;
-      text-decoration: none;
-      transition: all 0.2s ease;
-      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05);
-      margin-bottom: 20px;
-    }
-
-    .error-btn:hover {
-      background: rgba(45, 60, 100, 0.8);
-      border-color: rgba(255, 255, 255, 0.2);
-      box-shadow: 0 0 15px rgba(94, 226, 255, 0.1);
-    }
-
-    /* Responsive */
-    @media (max-width: 768px) {
-      body { padding: 24px 14px; }
-      body::after { background-size: 46px 46px; opacity: 0.72; }
-      .brand { gap: 9px; margin-bottom: 22px; }
-      .brand-logo { width: 34px; height: 40px; }
-      .brand-title { font-size: 20px; }
-      .brand-subtitle { font-size: 13px; }
-      .error-card { padding: 28px 22px; }
-      .error-title { font-size: 17px; }
-    }
-
-    @media (max-width: 420px) {
-      body { padding: 14px 10px; }
-      body::before { inset: -28%; }
-      body::after { background-size: 42px 42px; opacity: 0.62; }
-      .brand { gap: 8px; margin-bottom: 18px; }
-      .brand-logo { width: 30px; height: 36px; }
-      .brand-title { font-size: 16px; }
-      .brand-subtitle { font-size: 11px; }
-      .error-card { padding: 24px 18px; border-radius: 14px; }
-      .error-icon { width: 48px; height: 48px; margin-bottom: 16px; }
-      .error-icon svg { width: 22px; height: 22px; }
-      .error-title { font-size: 16px; }
-      .error-message { font-size: 13px; }
-      .error-btn { font-size: 13px; padding: 10px 20px; }
-      .error-hint { font-size: 11px; }
-    }
-  </style>
+  <link rel="stylesheet" href="/static/css/error.css">
 </head>
 
 <body>
-  <div class="error-wrapper">
 
+  <header class="header">
     <div class="brand">
       <img class="brand-logo" src="/static/images/logo.png" alt="SHASHKOFF VPN logo">
       <div class="brand-text">
         <h1 class="brand-title">SHASHKOFF VPN</h1>
-        <p class="brand-subtitle">{{ title | default("Информация") }}</p>
+        <p class="brand-subtitle">Персональный кабинет подписки</p>
       </div>
     </div>
+  </header>
 
+  <div class="error-wrapper">
     <div class="error-card">
       <div class="error-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          <line x1="12" y1="8" x2="12" y2="12"/>
-          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          <line x1="12" y1="8" x2="12" y2="12" />
+          <line x1="12" y1="16" x2="12.01" y2="16" />
         </svg>
       </div>
 
       <h2 class="error-title">{{ message }}</h2>
 
       <p class="error-message">{{ subtitle | default("Проверьте ссылку или обратитесь к администратору.") }}</p>
-
-      <a class="error-btn" href="javascript:history.back()">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="15 18 9 12 15 6"/>
-        </svg>
-        Назад
-      </a>
-
-      <p class="error-hint">SHASHKOFF VPN</p>
     </div>
-
   </div>
+
 </body>
 
 </html>

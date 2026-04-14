@@ -6,7 +6,7 @@ plus the single source of truth for "can this user use the product".
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,7 +27,8 @@ def is_user_accessible(user: User) -> bool:
     """
     if not user.is_active:
         return False
-    if user.expires_at is not None and user.expires_at <= datetime.utcnow():
+    # Fix J: replace deprecated utcnow(); strip tzinfo to compare with naive DB datetimes.
+    if user.expires_at is not None and user.expires_at <= datetime.now(timezone.utc).replace(tzinfo=None):
         return False
     return True
 
@@ -73,5 +74,5 @@ def list_active_devices(db: Session, user_id: int) -> list[Device]:
 
 def deactivate_device(db: Session, device: Device) -> None:
     device.is_active = False
-    device.last_seen_at = datetime.utcnow()
+    device.last_seen_at = datetime.now(timezone.utc).replace(tzinfo=None)  # Fix J
     db.commit()

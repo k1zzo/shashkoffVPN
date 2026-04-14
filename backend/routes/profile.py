@@ -1,5 +1,5 @@
 from base64 import b64encode
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -213,6 +213,11 @@ def _build_happ_routing_link() -> str:
     return f"happ://routing/onadd/{encoded}"
 
 
+# Fix D: the routing payload is fully static (no per-user/per-device data).
+# Compute once at import time instead of on every Happ subscription request.
+_HAPP_ROUTING_LINK: str = _build_happ_routing_link()
+
+
 def _build_profile_payload(
     token: str,
     device_id: str | None,
@@ -236,7 +241,7 @@ def _build_profile_payload(
         return None, None, _error_response(403, "User is inactive")
 
     existing_device = get_device(db, user.id, clean_device_id)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # Fix J: replace deprecated utcnow()
     known_device = existing_device is not None
 
     if existing_device is None:
@@ -266,6 +271,11 @@ def _build_profile_payload(
         # Snapshot mutable state BEFORE mutation so change flags are accurate.
         was_inactive = not existing_device.is_active
         uuid_backfilled = existing_device.device_uuid is None
+
+        # Fix A: enforce device limit before reactivating an inactive device.
+        # The Happ path already does this correctly; this brings /api/profile into parity.
+        if was_inactive and count_active_devices(db, user.id) >= user.max_devices:
+            return None, None, _error_response(403, "device limit reached")
 
         if uuid_backfilled:
             existing_device.device_uuid = str(uuid4())
@@ -410,7 +420,13 @@ def _happ_device_limit_response(user: "User") -> Response:
     profile_title = b64encode(
         "ЛИМИТ УСТРОЙСТВ ДОСТИГНУТ".encode("utf-8")
     ).decode("utf-8")
-    expire_ts = int(user.expires_at.timestamp()) if user.expires_at else _UNLIMITED_EXPIRE_TS
+    # Fix C: treat stored naive datetime as UTC before converting to Unix timestamp.
+    # datetime.timestamp() interprets naive datetimes as local time, which is
+    # wrong on non-UTC servers and across DST boundaries.
+    expire_ts = (
+        int(user.expires_at.replace(tzinfo=timezone.utc).timestamp())
+        if user.expires_at else _UNLIMITED_EXPIRE_TS
+    )
     return Response(
         content="",
         media_type="text/plain",
@@ -454,12 +470,18 @@ def build_happ_subscription_response(
         _log_happ_sub_request(request, token)
 
     if not is_user_accessible(user):
-        expired = user.expires_at is not None and user.expires_at <= datetime.utcnow()
+        # Fix J: replace deprecated utcnow(); strip tzinfo for comparison with naive DB datetimes.
+        _now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        expired = user.expires_at is not None and user.expires_at <= _now_utc
         blocked_label = "СРОК ДЕЙСТВИЯ ИСТЕК" if expired else "ПОДПИСКА ОТКЛЮЧЕНА"
         profile_title = b64encode(blocked_label.encode("utf-8")).decode("utf-8")
         # Use actual expiry timestamp when present; fall back to 0 (signals
         # expired/invalid to Happ clients that parse subscription-userinfo).
-        expire_ts = int(user.expires_at.timestamp()) if user.expires_at else 0
+        # Fix C: attach UTC tzinfo before converting to Unix timestamp.
+        expire_ts = (
+            int(user.expires_at.replace(tzinfo=timezone.utc).timestamp())
+            if user.expires_at else 0
+        )
         return Response(
             content="",
             media_type="text/plain",
@@ -487,7 +509,8 @@ def build_happ_subscription_response(
     if device_info is not None:
         pre_existing = get_device(db, user.id, device_info.hwid)
 
-        # Enforce limit strictly: only currently active devices refresh freely.
+        # Fix A (verified correct): the Happ path already enforces the limit
+        # before reactivation.  Only currently active devices refresh freely.
         # New devices (no row) and deleted/inactive devices must pass the check.
         # This prevents a deleted device from silently reactivating and exceeding
         # the device cap when another device has already claimed the slot.
@@ -496,7 +519,7 @@ def build_happ_subscription_response(
             return _happ_device_limit_response(user)
 
         result = register_or_update_happ_device(
-            db, user.id, device_info, datetime.utcnow()
+            db, user.id, device_info, datetime.now(timezone.utc).replace(tzinfo=None)  # Fix J
         )
         happ_device = result.device
         # Only reload Xray when the active client set actually changed.
@@ -515,7 +538,11 @@ def build_happ_subscription_response(
         "SHASHKOFF VPN".encode("utf-8")).decode("utf-8")
     announce = b64encode(
         f"Subscription | {user.username}".encode("utf-8")).decode("utf-8")
-    expire_ts = int(user.expires_at.timestamp()) if user.expires_at else _UNLIMITED_EXPIRE_TS
+    # Fix C: attach UTC tzinfo before converting to Unix timestamp.
+    expire_ts = (
+        int(user.expires_at.replace(tzinfo=timezone.utc).timestamp())
+        if user.expires_at else _UNLIMITED_EXPIRE_TS
+    )
 
     # /{token} is now the canonical personal link — both the web page and the
     # subscription URL resolve to it (browser gets cabinet, Happ gets VLESS).
@@ -635,7 +662,7 @@ def build_happ_subscription_response(
         "x-hwid-limit": str(user.max_devices),
         "x-robots-tag": "noindex, nofollow, noarchive, nosnippet, noimageindex",
         "cache-control": "no-store",
-        "routing": _build_happ_routing_link(),
+        "routing": _HAPP_ROUTING_LINK,  # Fix D: use module-level constant, not per-request call
     }
 
     # ── Per-device VLESS credential ───────────────────────────────────────────

@@ -12,7 +12,6 @@ from backend.platform_utils import (
     resolve_device_type,
 )
 from backend.queries import (
-    count_active_devices,
     get_user_by_token,
     is_user_accessible,
     list_active_devices,
@@ -103,8 +102,9 @@ def render_user_page(
     else:
         inactive_reason = None
 
-    active_devices = count_active_devices(db, user.id)
+    # Fix E: one query instead of two — len(device_rows) gives the active count.
     device_rows = list_active_devices(db, user.id)
+    active_devices = len(device_rows)
 
     subscription_url = build_subscription_url(
         token=user.public_token,

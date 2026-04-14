@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.config import get_settings
@@ -29,16 +29,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["devices"])
 
 
+# Fix F: max_length mirrors the DB column sizes (String(120)/String(60)) so
+# SQLite never silently stores oversized strings from malicious clients.
 class DeviceRegistrationRequest(BaseModel):
-    token: str
-    device_id: str
-    device_name: str
-    platform: str
+    token: str = Field(max_length=200)
+    device_id: str = Field(max_length=120)
+    device_name: str = Field(max_length=120)
+    platform: str = Field(max_length=60)
 
 
 class DeviceRemoveRequest(BaseModel):
-    token: str
-    device_id: str
+    token: str = Field(max_length=200)
+    device_id: str = Field(max_length=120)
 
 
 @router.post("/api/device/register")
@@ -70,12 +72,18 @@ def register_device(
     if not is_user_accessible(user):
         return JSONResponse(status_code=403, content={"detail": "User is inactive"})
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # Fix J: replace deprecated utcnow()
     existing_device = get_device(db, user.id, device_id)
     if existing_device is not None:
         # Snapshot mutable state BEFORE mutation so change flags are accurate.
         was_inactive = not existing_device.is_active
         uuid_backfilled = existing_device.device_uuid is None
+
+        # Fix A: enforce device limit before reactivating an inactive device.
+        # An inactive device does not hold a slot, so reactivating it counts as
+        # a new device for limit purposes — same logic as the Happ registration path.
+        if was_inactive and count_active_devices(db, user.id) >= user.max_devices:
+            return JSONResponse(status_code=403, content={"detail": "device limit reached"})
 
         existing_device.device_name = device_name
         existing_device.platform = platform

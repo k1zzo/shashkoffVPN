@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Iterator
@@ -9,6 +10,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.config import get_settings
 from backend.models import Base
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -81,11 +84,48 @@ def upgrade_db_schema() -> None:
             )
             conn.commit()
 
+        # Fix B: add unique indexes for device identity integrity.
+        # SQLite does not support ALTER TABLE ADD CONSTRAINT, so unique indexes
+        # are used instead. They are semantically equivalent and are reflected
+        # in the SQLAlchemy UniqueConstraint added to the Device model.
+        #
+        # NOTE: if existing data has duplicate (user_id, device_id) or duplicate
+        # device_uuid rows, index creation will fail — this surfaces data
+        # integrity violations that need manual resolution before re-starting.
+        try:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_user_device "
+                "ON devices(user_id, device_id)"
+            ))
+            conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "upgrade_db_schema: could not create uq_devices_user_device — "
+                "check for duplicate (user_id, device_id) rows: %s", exc
+            )
+
+        try:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_device_uuid "
+                "ON devices(device_uuid) WHERE device_uuid IS NOT NULL"
+            ))
+            conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "upgrade_db_schema: could not create uq_devices_device_uuid — "
+                "check for duplicate device_uuid rows: %s", exc
+            )
+
 
 def get_db() -> Generator[Session, None, None]:
+    # Fix H: rollback on exception to match session_scope() behaviour and
+    # prevent a session with uncommitted error state from being silently closed.
     session = SessionLocal()
     try:
         yield session
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+# Fix J: timezone-aware UTC helper for column defaults; strips tzinfo so
+# SQLAlchemy stores a naive UTC datetime (matching the rest of the codebase).
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -23,7 +29,7 @@ class User(Base):
     max_devices: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_utcnow  # Fix J: replace deprecated utcnow
     )
     traffic_up_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     traffic_down_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -56,13 +62,20 @@ class Device(Base):
     # receive a device_uuid on first refresh via register_or_update_happ_device.
     # Deleting/deactivating a device excludes this UUID from the Xray active
     # client set, providing real per-device VPN access revocation.
-    device_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Fix B: unique=True enforces per-device UUID at the DB level (NULLs exempt).
+    device_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True, unique=True)
     first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_utcnow  # Fix J: replace deprecated utcnow
     )
     last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_utcnow  # Fix J: replace deprecated utcnow
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     user: Mapped[User] = relationship(back_populates="devices")
+
+    # Fix B: composite unique on (user_id, device_id) so the same physical device
+    # can never produce two rows for one user, even under concurrent registration.
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_id", name="uq_devices_user_device"),
+    )
