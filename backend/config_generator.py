@@ -64,11 +64,21 @@ def build_vpn_profile(user_uuid: str, username: str, settings: Settings) -> dict
                     "detour": "proxy",
                 },
                 {
-                    "tag": "dns-local",
+                    "tag": "dns-direct",
                     "address": "local",
                     "detour": "direct",
                 },
             ],
+            "rules": [
+                # Resolve the proxy server's own hostname via direct DNS to
+                # break the bootstrap circular dependency (proxy needs DNS,
+                # but DNS would need the proxy to connect).
+                {"outbound": "any", "server": "dns-direct"},
+                # Direct-routed RU traffic uses the local/system resolver —
+                # faster, no proxy latency, resolves to the nearest CDN node.
+                {"geoip": ["ru"], "server": "dns-direct"},
+            ],
+            "final": "dns-remote",
         },
         "outbounds": [
             {
@@ -77,6 +87,7 @@ def build_vpn_profile(user_uuid: str, username: str, settings: Settings) -> dict
                 "server": settings.vpn_server,
                 "server_port": settings.vpn_port,
                 "uuid": user_uuid,
+                "flow": "xtls-rprx-vision",
                 "packet_encoding": "xudp",
                 "tls": {
                     "enabled": True,
@@ -117,11 +128,9 @@ def build_vpn_profile(user_uuid: str, username: str, settings: Settings) -> dict
                     "domain_suffix": ["localhost", "local", "lan"],
                     "outbound": "direct",
                 },
-                {
-                    "name": "ru-traffic",
-                    "geoip": ["ru"],
-                    "outbound": "direct",
-                },
+                # youtube and telegram come BEFORE geoip:ru so that Russian
+                # CDN nodes serving these services do not match the ru-traffic
+                # rule and bypass the proxy.
                 {
                     "name": "youtube",
                     "domain_suffix": YOUTUBE_DOMAIN_SUFFIXES,
@@ -131,6 +140,12 @@ def build_vpn_profile(user_uuid: str, username: str, settings: Settings) -> dict
                     "name": "telegram",
                     "domain_suffix": TELEGRAM_DOMAIN_SUFFIXES,
                     "outbound": "proxy",
+                },
+                {
+                    "name": "ru-traffic",
+                    "geoip": ["ru"],
+                    "geosite": ["ru"],
+                    "outbound": "direct",
                 },
                 {
                     "name": "default",
