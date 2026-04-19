@@ -54,7 +54,7 @@ class Device(Base):
     # source: "happ" | "api" | NULL (legacy / pre-field)
     # "happ" = registered by a Happ subscription request via x-hwid
     # "api"  = registered via POST /api/device/register
-    # NULL   = registered before this field was added, or via /api/profile auto-register
+    # NULL   = registered before this field was added
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # device_uuid: per-device VPN credential (UUID4).
     # This is the UUID issued in the VLESS URL for this specific device.

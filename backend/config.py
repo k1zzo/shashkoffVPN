@@ -108,6 +108,7 @@ class Settings:
     vpn_sni: str
     vpn_transport: str
     vpn_profile_name_prefix: str
+    vpn_location_label: str
     vpn_config_warnings: tuple[str, ...]
     vpn_config_incomplete: bool
     # ── Happ Limited Links (optional) ────────────────────────────────────────
@@ -204,6 +205,7 @@ class Settings:
         )
         vpn_transport = os.getenv("VPN_TRANSPORT", "tcp")
         vpn_profile_name_prefix = os.getenv("VPN_PROFILE_NAME_PREFIX", "SHASHKOFFVPN")
+        vpn_location_label = os.getenv("VPN_LOCATION_LABEL", "🇳🇱 Нидерланды")
 
         vpn_config_warnings = _build_vpn_config_warnings(
             vpn_server=vpn_server,
@@ -251,6 +253,7 @@ class Settings:
             vpn_sni=vpn_sni,
             vpn_transport=vpn_transport,
             vpn_profile_name_prefix=vpn_profile_name_prefix,
+            vpn_location_label=vpn_location_label,
             vpn_config_warnings=tuple(vpn_config_warnings),
             vpn_config_incomplete=bool(vpn_config_warnings),
             happ_limited_links_enabled=happ_limited_links_enabled,

@@ -3,14 +3,11 @@ from datetime import datetime, timezone
 import json
 import logging
 import re
-from uuid import uuid4
-
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from backend.config import get_settings
-from backend.config_generator import build_vpn_profile
 from backend.db import get_db
 from backend.happ_devices import extract_happ_device_info, register_or_update_happ_device
 from backend.models import Device, User
@@ -24,6 +21,7 @@ from backend.queries import (
 from backend.subscription_utils import build_subscription_url, build_vless_url
 from backend.url_utils import build_app_url
 from backend.xray_clients import apply_xray_client_changes
+from backend.xray_config_generator import build_xray_config
 from backend.xray_stats import (
     combined_traffic,
     get_user_traffic_active,
@@ -114,231 +112,12 @@ def _error_response(status_code: int, detail: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"detail": detail})
 
 
-def _build_real_subscription_body(user: User, *, vless_uuid: str | None = None) -> str:
-    """Build the VLESS URL for a subscription response.
-
-    vless_uuid: the UUID to embed in the VLESS URL.
-      - Pass device.device_uuid for Happ requests (per-device credential).
-      - Pass None to fall back to user.uuid (legacy / no x-hwid path).
-
-    The fallback to user.uuid is a transitional behavior. It keeps existing
-    non-Happ clients working while Happ clients migrate to per-device UUIDs.
-    """
-    effective_uuid = vless_uuid if vless_uuid else user.uuid
-    return build_vless_url(
-        user_uuid=effective_uuid,
-        settings=settings,
-        server_description=settings.happ_server_description,
-    )
-
-
-def _build_happ_routing_payload() -> dict:
-    return {
-        "Name": "RU Direct",
-        "GlobalProxy": "true",
-        "RemoteDNSType": "DoH",
-        "RemoteDNSDomain": "https://cloudflare-dns.com/dns-query",
-        "RemoteDNSIP": "1.1.1.1",
-        "DomesticDNSType": "DoH",
-        "DomesticDNSDomain": "https://dns.google/dns-query",
-        "DomesticDNSIP": "8.8.8.8",
-        "Geoipurl": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "DnsHosts": {
-            "cloudflare-dns.com": "1.1.1.1",
-            "dns.google": "8.8.8.8",
-        },
-        "DirectSites": [
-            # RU consumer/utility
-            "regexp:(^|\\.)2ip\\.ru$",
-            "regexp:(^|\\.)yandex\\.(ru|by|kz|uz|com)$",
-            "regexp:(^|\\.)ya\\.ru$",
-            "regexp:(^|\\.)vk\\.com$",
-            "regexp:(^|\\.)mail\\.ru$",
-            "regexp:(^|\\.)gosuslugi\\.ru$",
-            "regexp:(^|\\.)dzen\\.ru$",
-            "regexp:(^|\\.)avito\\.ru$",
-            "regexp:(^|\\.)ozon\\.ru$",
-            "regexp:(^|\\.)wildberries\\.ru$",
-            # RU banking / payments
-            "regexp:(^|\\.)sberbank\\.ru$",
-            "regexp:(^|\\.)sber\\.ru$",
-            "regexp:(^|\\.)sberpay\\.ru$",
-            "regexp:(^|\\.)tinkoff\\.ru$",
-            "regexp:(^|\\.)alfabank\\.ru$",
-            "regexp:(^|\\.)vtb\\.ru$",
-        ],
-        "DirectIp": [
-            "geoip:ru",
-            "10.0.0.0/8",
-            "172.16.0.0/12",
-            "192.168.0.0/16",
-            "127.0.0.0/8",
-            "169.254.0.0/16",
-            "224.0.0.0/4",
-            "255.255.255.255",
-            "::1/128",
-            "fc00::/7",
-            "fe80::/10",
-        ],
-        "ProxySites": [
-            # Google / YouTube
-            "regexp:(^|\\.)google\\.com$",
-            "regexp:(^|\\.)googleapis\\.com$",
-            "regexp:(^|\\.)gstatic\\.com$",
-            "regexp:(^|\\.)youtube\\.com$",
-            "regexp:(^|\\.)youtu\\.be$",
-            "regexp:(^|\\.)googlevideo\\.com$",
-            "regexp:(^|\\.)ytimg\\.com$",
-            "regexp:(^|\\.)youtubei\\.googleapis\\.com$",
-            # Telegram
-            "regexp:(^|\\.)telegram\\.org$",
-            "regexp:(^|\\.)t\\.me$",
-            "regexp:(^|\\.)telegra\\.ph$",
-            "regexp:(^|\\.)telegram\\.me$",
-        ],
-        "ProxyIp": [],
-        "BlockSites": [],
-        "BlockIp": [],
-        "DomainStrategy": "IPIfNonMatch",
-        "FakeDNS": "false",
-    }
-
-
-def _build_happ_routing_link() -> str:
-    payload = _build_happ_routing_payload()
-    encoded = b64encode(
-        json.dumps(payload, ensure_ascii=False,
-                   separators=(",", ":")).encode("utf-8")
-    ).decode("utf-8")
-    return f"happ://routing/onadd/{encoded}"
-
-
-# Fix D: the routing payload is fully static (no per-user/per-device data).
-# Compute once at import time instead of on every Happ subscription request.
-_HAPP_ROUTING_LINK: str = _build_happ_routing_link()
-
-
-def _build_profile_payload(
-    token: str,
-    device_id: str | None,
-    db: Session,
-) -> tuple[dict | None, dict | None, JSONResponse | None]:
-    clean_token = token.strip()
-    clean_device_id = device_id.strip() if device_id is not None else ""
-
-    if not clean_token:
-        return None, None, _error_response(400, "token is required")
-
-    if not clean_device_id:
-        return None, None, _error_response(400, "device_id is required")
-
-    user = get_user_by_token(db, clean_token)
-
-    if user is None:
-        return None, None, _error_response(404, "Profile not found")
-
-    if not is_user_accessible(user):
-        return None, None, _error_response(403, "User is inactive")
-
-    existing_device = get_device(db, user.id, clean_device_id)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)  # Fix J: replace deprecated utcnow()
-    known_device = existing_device is not None
-
-    if existing_device is None:
-        if count_active_devices(db, user.id) >= user.max_devices:
-            return None, None, _error_response(403, "device limit reached")
-
-        new_device = Device(
-            user_id=user.id,
-            device_id=clean_device_id,
-            device_name=f"Web Device {clean_device_id[-6:]}",
-            platform="web",
-            device_uuid=str(uuid4()),
-            first_seen_at=now,
-            last_seen_at=now,
-            is_active=True,
-        )
-        db.add(new_device)
-        db.commit()
-        active_device = new_device
-        logger.info(
-            "XRAY-APPLY: reason=new_device device_id=%.24s",
-            clean_device_id,
-        )
-        snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
-        apply_xray_client_changes(db, settings)
-    else:
-        # Snapshot mutable state BEFORE mutation so change flags are accurate.
-        was_inactive = not existing_device.is_active
-        uuid_backfilled = existing_device.device_uuid is None
-
-        # Fix A: enforce device limit before reactivating an inactive device.
-        # The Happ path already does this correctly; this brings /api/profile into parity.
-        if was_inactive and count_active_devices(db, user.id) >= user.max_devices:
-            return None, None, _error_response(403, "device limit reached")
-
-        if uuid_backfilled:
-            existing_device.device_uuid = str(uuid4())
-        existing_device.last_seen_at = now
-        existing_device.is_active = True
-        db.commit()  # commit before Xray update so the new UUID is visible
-
-        if uuid_backfilled or was_inactive:
-            reason = "uuid_backfilled" if uuid_backfilled else "reactivated"
-            logger.info(
-                "XRAY-APPLY: reason=%s device_id=%.24s",
-                reason, clean_device_id,
-            )
-            snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
-            apply_xray_client_changes(db, settings)
-
-        active_device = existing_device
-
-    active_devices = count_active_devices(db, user.id)
-
-    # Use this device's own UUID in the profile. Falls back to user.uuid only
-    # if device_uuid is somehow still null (should not occur after above logic).
-    effective_uuid = active_device.device_uuid if active_device.device_uuid else user.uuid
-
-    profile = build_vpn_profile(
-        user_uuid=effective_uuid,
-        username=user.username,
-        settings=settings,
-    )
-    profile_meta = profile.setdefault("meta", {})
-    profile_meta.update({
-        "username": user.username,
-        "public_token": user.public_token,
-        "expires_at": user.expires_at.isoformat() if user.expires_at else None,
-        "device_id": clean_device_id,
-        "known_device": known_device,
-        "config_incomplete": settings.vpn_config_incomplete,
-    })
-    context = {
-        "username": user.username,
-        "public_token": user.public_token,
-        "device_id": clean_device_id,
-        "devices_used": active_devices,
-        "max_devices": user.max_devices,
-        "known_device": known_device,
-        "app_base_url_configured": settings.app_base_url_configured,
-    }
-
-    return profile, context, None
-
-
 def _json_or_download_response(
-    profile: dict,
+    uuid: str,
     mode: str,
     username: str,
 ) -> Response:
-    url = build_vless_url(
-        user_uuid=profile["outbounds"][0]["uuid"],
-        settings=settings,
-    )
-
-    if mode in {"raw", "json"}:
-        return Response(content=url, media_type="text/plain")
+    url = build_vless_url(user_uuid=uuid, settings=settings)
 
     if mode == "download":
         filename = f"{re.sub(r'[^a-zA-Z0-9_-]', '-', username).strip('-') or 'user'}.txt"
@@ -353,31 +132,8 @@ def _json_or_download_response(
     return Response(content=url, media_type="text/plain")
 
 
-# NOTE: /api/profile enforces device limits (requires device_id, auto-registers
-# devices, rejects when max_devices is reached). This is the per-device config
-# endpoint used by direct Xray clients. In the subscription-only flow, the Happ
-# client uses /{token} (the canonical personal link) which detects Happ requests
-# by their characteristic headers and returns the subscription response. Device
-# tracking is delegated to Happ via subscription headers (x-hwid-limit,
-# x-hwid-active, subscription-always-hwid-enable). The two code paths serve
-# different distribution models; this is by design, not an oversight.
-
-@router.get("/api/profile/{token}")
-def get_vpn_profile(
-    token: str,
-    device_id: str | None = Query(default=None),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    profile, _, error = _build_profile_payload(
-        token=token, device_id=device_id, db=db)
-    if error is not None:
-        return error
-    return JSONResponse(content=profile)
-
-
 @router.get("/open/{token}")
 def open_profile(
-    request: Request,
     token: str,
     device_id: str | None = Query(default=None),
     mode: str | None = Query(default=None),
@@ -392,19 +148,29 @@ def open_profile(
             }
         )
 
-    profile, context, error = _build_profile_payload(
-        token=token, device_id=device_id, db=db)
-    if error is not None:
-        return error
+    clean_token = token.strip()
+    if not clean_token:
+        return _error_response(400, "token is required")
 
-    # All modes (json, raw, download) return the VLESS URL in various forms.
-    # Default (no mode) also returns raw — the legacy open_profile.html template
-    # has been removed; this route is kept for internal/manual workflows only.
+    user = get_user_by_token(db, clean_token)
+    if user is None:
+        return _error_response(404, "Profile not found")
+    if not is_user_accessible(user):
+        return _error_response(403, "User is inactive")
+
+    # Resolve per-device UUID if device_id is provided.
+    effective_uuid = user.uuid
+    clean_device_id = device_id.strip() if device_id else ""
+    if clean_device_id:
+        device = get_device(db, user.id, clean_device_id)
+        if device and device.device_uuid:
+            effective_uuid = device.device_uuid
+
     clean_mode = (mode or "raw").strip().lower()
     return _json_or_download_response(
-        profile=profile,
+        uuid=effective_uuid,
         mode=clean_mode,
-        username=context["username"],
+        username=user.username,
     )
 
 
@@ -600,8 +366,7 @@ def build_happ_subscription_response(
     #   - Device names and platform labels
     #   - last_seen_at timestamps
     #   - Device removal ("free a slot") for the DB layer
-    #   - Device limit enforcement for non-Happ clients (/api/profile,
-    #     /api/device/register)
+    #   - Device limit enforcement for non-Happ clients (/api/device/register)
     #
     # KNOWN LIMITATIONS:
     #   - Happ HWID state is opaque: we never receive the HWID list or the
@@ -662,7 +427,7 @@ def build_happ_subscription_response(
         "x-hwid-limit": str(user.max_devices),
         "x-robots-tag": "noindex, nofollow, noarchive, nosnippet, noimageindex",
         "cache-control": "no-store",
-        "routing": _HAPP_ROUTING_LINK,  # Fix D: use module-level constant, not per-request call
+        "routing": "happ://routing/off",
     }
 
     # ── Per-device VLESS credential ───────────────────────────────────────────
@@ -672,16 +437,16 @@ def build_happ_subscription_response(
     # the Xray config terminates its VPN access independently of other devices.
     #
     # Fallback to user.uuid when x-hwid is absent (non-HWID Happ path).
-    vless_uuid: str | None = happ_device.device_uuid if happ_device else None
-    body = _build_real_subscription_body(user, vless_uuid=vless_uuid)
+    effective_uuid = happ_device.device_uuid if happ_device and happ_device.device_uuid else user.uuid
+    config = build_xray_config(user_uuid=effective_uuid, settings=settings)
+    body = json.dumps([config], ensure_ascii=False, separators=(",", ":"))
 
     if settings.happ_hide_server_settings:
         resp_headers["hide-settings"] = "1"
-        body = "#hide-settings: 1\n" + body
 
     return Response(
         content=body,
         headers=resp_headers,
-        media_type="text/plain",
+        media_type="application/json; charset=utf-8",
     )
 

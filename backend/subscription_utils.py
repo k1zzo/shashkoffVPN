@@ -12,7 +12,7 @@ from backend.url_utils import build_app_url
 def build_vless_url(
     *, user_uuid: str, settings: Settings, server_description: str = ""
 ) -> str:
-    fragment = "🇳🇱 Нидерланды"
+    fragment = settings.vpn_location_label
     if server_description:
         encoded = b64encode(server_description.encode("utf-8")).decode("ascii")
         fragment = f"{fragment}?serverDescription={encoded}"

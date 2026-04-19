@@ -19,7 +19,6 @@ Subscription-only VPN service. Users connect through the Happ client — no manu
 | `GET /u/{token}` | Alias for `/{token}` |
 | `POST /api/device/register` | Register or update a device (enforces per-user limit) |
 | `POST /api/device/remove` | Deactivate a device |
-| `GET /api/profile/{token}?device_id=` | Return VPN profile JSON, auto-register device |
 | `GET /open/{token}` | Internal — return raw VLESS URL (`?mode=raw\|json\|download`) |
 
 ## Access policy
@@ -350,7 +349,6 @@ VPN_TRANSPORT=tcp
 ```bash
 curl -i https://vpn.your-domain.com/health
 curl -i https://vpn.your-domain.com/demo-token
-curl -s "https://vpn.your-domain.com/api/profile/demo-token?device_id=test-device" | python3 -m json.tool
 ```
 
 ## Manual endpoint testing (local)
@@ -362,6 +360,4 @@ curl http://127.0.0.1:8000/demo-token
 curl -s -X POST http://127.0.0.1:8000/api/device/register \
   -H "Content-Type: application/json" \
   -d '{"token":"demo-token","device_id":"my-device-1","device_name":"MacBook","platform":"macOS"}'
-
-curl -s "http://127.0.0.1:8000/api/profile/demo-token?device_id=my-device-1" | python3 -m json.tool
 ```

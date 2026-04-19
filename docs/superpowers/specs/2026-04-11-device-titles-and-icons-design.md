@@ -140,7 +140,6 @@ Add smoke tests verifying:
 
 ## What Is Not Changed
 
-- `/api/profile/{token}` response — no new fields
 - `POST /api/device/register` / `POST /api/device/remove` — unaffected
 - Happ subscription response — unaffected
 - Any existing test (other than adding to `test_cabinet_ux.py`)
