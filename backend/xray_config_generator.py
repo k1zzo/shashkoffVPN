@@ -38,7 +38,7 @@ def build_xray_config(
     settings: Settings,
 ) -> dict[str, Any]:
     """Build a full Xray JSON config for Happ's custom tunnel feature."""
-    return {
+    config: dict[str, Any] = {
         "dns": {
             "queryStrategy": "UseIPv4",
             "servers": [
@@ -171,3 +171,6 @@ def build_xray_config(
         },
         "remarks": settings.vpn_location_label,
     }
+    if settings.happ_server_description.strip():
+        config["meta"] = {"serverDescription": settings.happ_server_description}
+    return config

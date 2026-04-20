@@ -117,7 +117,11 @@ def _json_or_download_response(
     mode: str,
     username: str,
 ) -> Response:
-    url = build_vless_url(user_uuid=uuid, settings=settings)
+    url = build_vless_url(
+        user_uuid=uuid,
+        settings=settings,
+        server_description=settings.happ_server_description,
+    )
 
     if mode == "download":
         filename = f"{re.sub(r'[^a-zA-Z0-9_-]', '-', username).strip('-') or 'user'}.txt"

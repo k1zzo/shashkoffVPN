@@ -120,8 +120,11 @@ class Settings:
     happ_provider_code: str
     happ_auth_key: str
     happ_api_url: str  # override base URL; defaults to https://happ-proxy.com
-    # When True, send `hide-settings: 1` HTTP header and prepend `#hide-settings: 1`
-    # to the subscription body so Happ hides the server settings UI.
+    # When True, send the `hide-settings: 1` HTTP header so Happ hides the
+    # server settings UI for users of this subscription. Advanced parameter —
+    # requires a valid providerid header (already sent in profile.py). Not
+    # available in all Happ app versions.
+    # Docs: https://www.happ.su/main/dev-docs/app-management
     # Set HAPP_HIDE_SERVER_SETTINGS=false to disable (default: true).
     happ_hide_server_settings: bool
     # When non-empty, embed this text as a base64 `?serverDescription=` param in
