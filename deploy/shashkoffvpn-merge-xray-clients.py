@@ -3,9 +3,9 @@
 
 Usage (standalone script):
   python3 shashkoffvpn-merge-xray-clients.py \\
-      /opt/shashkoffvpn/data/xray-clients.json \\
-      /etc/xray/config.base.json \\
-      /etc/xray/config.merged.json
+      /opt/shashkoffVPN/data/xray-clients.json \\
+      /usr/local/etc/xray/config.base.json \\
+      /usr/local/etc/xray/config.merged.json
 
 Arguments:
   clients_path     Path to the clients JSON array written by the app.

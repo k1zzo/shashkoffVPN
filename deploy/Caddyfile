@@ -1,0 +1,34 @@
+# /etc/caddy/Caddyfile
+#
+# Caddy за HAProxy, слушает только на 127.0.0.1:9443.
+# Порт 80 НЕ используется — ACME через TLS-ALPN-01 на :443
+# (HAProxy роутит acme-tls/1 коннекты сюда).
+
+{
+	email admin@shkoff-cloud.com
+
+	# Caddy слушает HTTPS на 9443 (внешний :443 у HAProxy).
+	# http_port не задаём — HTTP listener не нужен.
+	https_port 9443
+
+	# Не пытаться открывать порт 80 для редиректа (его и так нет).
+	auto_https disable_redirects
+}
+
+shkoff-cloud.com {
+	bind 127.0.0.1
+
+	tls {
+		# Используем только TLS-ALPN-01 challenge.
+		# HTTP-01 невозможен — порт 80 закрыт.
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}

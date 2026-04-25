@@ -28,13 +28,13 @@
 
 [Unit]
 Description=Watch ShashkoffVPN Xray clients config for changes
-Documentation=https://github.com/yourorg/shashkoffvpn
+Documentation=https://github.com/k1zzo/shashkoffVPN
 
 [Path]
 # This must match XRAY_CLIENTS_CONFIG_PATH in .env (host-side path).
 # Default Docker deployment: app writes to /app/data/ inside the container,
-# which maps to /opt/shashkoffvpn/data/ on the host.
-PathModified=/opt/shashkoffvpn/data/xray-clients.json
+# which maps to /opt/shashkoffVPN/data/ on the host.
+PathModified=/opt/shashkoffVPN/data/xray-clients.json
 
 [Install]
 WantedBy=multi-user.target
