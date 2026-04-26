@@ -87,7 +87,8 @@ def _log_happ_sub_request(request: Request, token: str) -> None:
 
     sanitized_headers: dict[str, str] = {}
     for name, value in request.headers.items():
-        sanitized_headers[name] = "[REDACTED]" if name.lower() in _REDACTED_HEADER_NAMES else value
+        sanitized_headers[name] = "[REDACTED]" if name.lower(
+        ) in _REDACTED_HEADER_NAMES else value
 
     # One-line summary — easy to grep in Docker logs.
     logging.warning(
@@ -95,10 +96,13 @@ def _log_happ_sub_request(request: Request, token: str) -> None:
         safe_token, client_ip, request.url.path, raw_query,
     )
     # Structured detail block.
-    logging.warning("[HAPP-DIAG] query_params=%s", json.dumps(parsed_params, ensure_ascii=False))
-    logging.warning("[HAPP-DIAG] headers=%s", json.dumps(sanitized_headers, ensure_ascii=False))
+    logging.warning("[HAPP-DIAG] query_params=%s",
+                    json.dumps(parsed_params, ensure_ascii=False))
+    logging.warning("[HAPP-DIAG] headers=%s",
+                    json.dumps(sanitized_headers, ensure_ascii=False))
 
 # ── END TEMP: HAPP REQUEST INSPECTION ────────────────────────────────────────
+
 
 # Stable far-future timestamp used when a user has no expires_at (unlimited plan).
 # 2099-12-31 00:00:00 UTC — avoids a sliding "now + 30 days" that changes on every request.
@@ -244,7 +248,8 @@ def build_happ_subscription_response(
         _now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         expired = user.expires_at is not None and user.expires_at <= _now_utc
         blocked_label = "СРОК ДЕЙСТВИЯ ИСТЕК" if expired else "ПОДПИСКА ОТКЛЮЧЕНА"
-        profile_title = b64encode(blocked_label.encode("utf-8")).decode("utf-8")
+        profile_title = b64encode(
+            blocked_label.encode("utf-8")).decode("utf-8")
         # Use actual expiry timestamp when present; fall back to 0 (signals
         # expired/invalid to Happ clients that parse subscription-userinfo).
         # Fix C: attach UTC tzinfo before converting to Unix timestamp.
@@ -289,7 +294,8 @@ def build_happ_subscription_response(
             return _happ_device_limit_response(user)
 
         result = register_or_update_happ_device(
-            db, user.id, device_info, datetime.now(timezone.utc).replace(tzinfo=None)  # Fix J
+            db, user.id, device_info, datetime.now(
+                timezone.utc).replace(tzinfo=None)  # Fix J
         )
         happ_device = result.device
         # Only reload Xray when the active client set actually changed.
@@ -300,7 +306,8 @@ def build_happ_subscription_response(
                 "XRAY-APPLY: reason=%s token=%.8s device_id=%.24s",
                 result.xray_change_reason(), token, device_info.hwid,
             )
-            snapshot_user_traffic_before_reload(db=db, user=user, xray_api_addr=settings.xray_api_addr)
+            snapshot_user_traffic_before_reload(
+                db=db, user=user, xray_api_addr=settings.xray_api_addr)
             apply_xray_client_changes(db, settings)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -421,7 +428,7 @@ def build_happ_subscription_response(
         "profile-title": f"base64:{profile_title}",
         "profile-update-interval": _HAPP_UPDATE_INTERVAL_HOURS,
         "profile-web-page-url": canonical_url,
-        "providerid": "6QlMYR5q",
+        "providerid": "IwssWKy1",
         "subscription-always-hwid-enable": "1",
         "subscription-userinfo": f"upload={_upload_bytes}; download={_download_bytes}; total=0; expire={expire_ts}",
         "subscriptions-collapse": "0",
@@ -453,4 +460,3 @@ def build_happ_subscription_response(
         headers=resp_headers,
         media_type="application/json; charset=utf-8",
     )
-
