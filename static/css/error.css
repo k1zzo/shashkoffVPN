@@ -151,7 +151,7 @@ body::before {
   max-width: 480px;
   position: relative;
   z-index: 2;
-  padding: 0 20px 100px;
+  padding: 0 20px 78px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -272,7 +272,7 @@ body::before {
   }
 
   .error-wrapper {
-    padding: 0 14px 100px;
+    padding: 0 14px 73px;
   }
 
   .error-card {
@@ -294,6 +294,7 @@ body::before {
   }
 
   .error-wrapper {
+    padding: 0 14px 71px;
     max-width: 100%;
   }
 
@@ -334,7 +335,7 @@ body::before {
   }
 
   .error-wrapper {
-    padding: 0 10px 100px;
+    padding: 0 10px 67px;
   }
 
   .error-card {
