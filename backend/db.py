@@ -53,6 +53,8 @@ def upgrade_db_schema() -> None:
       devices.device_uuid  — per-device VPN UUID (UUID4); NULL for legacy rows
       users.traffic_up_bytes   — cumulative upload bytes from deleted devices (default 0)
       users.traffic_down_bytes — cumulative download bytes from deleted devices (default 0)
+      users.traffic_up_high_water_bytes   — monotonic upload display floor (default 0)
+      users.traffic_down_high_water_bytes — monotonic download display floor (default 0)
     """
     with engine.connect() as conn:
         existing = {
@@ -81,6 +83,16 @@ def upgrade_db_schema() -> None:
         if "traffic_down_bytes" not in existing_users:
             conn.execute(
                 text("ALTER TABLE users ADD COLUMN traffic_down_bytes INTEGER NOT NULL DEFAULT 0")
+            )
+            conn.commit()
+        if "traffic_up_high_water_bytes" not in existing_users:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN traffic_up_high_water_bytes INTEGER NOT NULL DEFAULT 0")
+            )
+            conn.commit()
+        if "traffic_down_high_water_bytes" not in existing_users:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN traffic_down_high_water_bytes INTEGER NOT NULL DEFAULT 0")
             )
             conn.commit()
 

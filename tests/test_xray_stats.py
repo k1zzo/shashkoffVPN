@@ -29,6 +29,7 @@ from backend.xray_stats import (
     get_device_traffic,
     get_user_traffic,
     get_user_traffic_active,
+    monotonic_combined_traffic,
 )
 
 
@@ -610,3 +611,106 @@ class TestGetDeviceTraffic:
             )
         assert result is not None
         assert result.total_bytes == 0
+
+
+# ── monotonic_combined_traffic ────────────────────────────────────────────────
+
+
+class _FakeUser:
+    """In-memory stand-in for the User model — avoids needing a real DB row
+    for pure unit tests of monotonic_combined_traffic."""
+
+    def __init__(
+        self,
+        *,
+        username: str = "u",
+        traffic_up_bytes: int = 0,
+        traffic_down_bytes: int = 0,
+        traffic_up_high_water_bytes: int = 0,
+        traffic_down_high_water_bytes: int = 0,
+    ):
+        self.username = username
+        self.traffic_up_bytes = traffic_up_bytes
+        self.traffic_down_bytes = traffic_down_bytes
+        self.traffic_up_high_water_bytes = traffic_up_high_water_bytes
+        self.traffic_down_high_water_bytes = traffic_down_high_water_bytes
+
+
+class _FakeDB:
+    def __init__(self):
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+class TestMonotonicCombinedTraffic:
+    def test_first_read_advances_hwm_to_combined(self):
+        """A freshly-created user with stored=0, live=1MB → HWM should advance to 1MB."""
+        u = _FakeUser()
+        live = UserTrafficStats(upload_bytes=1_000_000, download_bytes=0, total_bytes=1_000_000)
+        result = monotonic_combined_traffic(db=_FakeDB(), user=u, live=live)
+        assert result.upload_bytes == 1_000_000
+        assert result.download_bytes == 0
+        assert u.traffic_up_high_water_bytes == 1_000_000
+        assert u.traffic_down_high_water_bytes == 0
+
+    def test_xray_unavailable_clamps_to_hwm(self):
+        """live=None must not drop the displayed total below the existing HWM."""
+        u = _FakeUser(
+            traffic_up_bytes=0,
+            traffic_down_bytes=0,
+            traffic_up_high_water_bytes=2 * 1024 ** 3,    # 2 GB seen previously
+            traffic_down_high_water_bytes=0,
+        )
+        result = monotonic_combined_traffic(db=_FakeDB(), user=u, live=None)
+        # stored=0 + live=None → computed=0, but HWM clamps to 2 GB.
+        assert result.upload_bytes == 2 * 1024 ** 3
+        assert result.download_bytes == 0
+        # HWM is unchanged on a regression — no spurious advance.
+        assert u.traffic_up_high_water_bytes == 2 * 1024 ** 3
+
+    def test_growth_advances_hwm(self):
+        """When computed exceeds HWM, HWM advances to the new total."""
+        u = _FakeUser(
+            traffic_up_bytes=1_000_000,
+            traffic_up_high_water_bytes=1_500_000,
+        )
+        live = UserTrafficStats(upload_bytes=1_000_000, download_bytes=0, total_bytes=1_000_000)
+        # computed_up = 1M + 1M = 2M; HWM was 1.5M → advance to 2M.
+        result = monotonic_combined_traffic(db=_FakeDB(), user=u, live=live)
+        assert result.upload_bytes == 2_000_000
+        assert u.traffic_up_high_water_bytes == 2_000_000
+
+    def test_equal_to_hwm_does_not_commit(self):
+        """When computed == HWM exactly, HWM is not advanced (no spurious commit)."""
+        u = _FakeUser(
+            traffic_up_bytes=1_000_000,
+            traffic_up_high_water_bytes=1_000_000,
+        )
+        db = _FakeDB()
+        result = monotonic_combined_traffic(db=db, user=u, live=None)
+        assert result.upload_bytes == 1_000_000
+        # No DB commit — values were already equal, nothing to persist.
+        assert db.commits == 0
+
+    def test_partial_regression_clamps_each_axis_independently(self):
+        """If only download regresses, upload still advances."""
+        u = _FakeUser(
+            traffic_up_bytes=0,
+            traffic_down_bytes=0,
+            traffic_up_high_water_bytes=500_000,
+            traffic_down_high_water_bytes=2_000_000,
+        )
+        # computed_up = 0 + 1M = 1M (above HWM 500k → advance)
+        # computed_down = 0 + 0 = 0 (below HWM 2M → clamp)
+        # Whole result clamps because at least one axis regressed.
+        live = UserTrafficStats(upload_bytes=1_000_000, download_bytes=0, total_bytes=1_000_000)
+        result = monotonic_combined_traffic(db=_FakeDB(), user=u, live=live)
+        # Both axes use max(computed, hwm) on a regression.
+        assert result.upload_bytes == 1_000_000  # max(1M, 500k)
+        assert result.download_bytes == 2_000_000  # max(0, 2M)

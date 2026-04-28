@@ -364,84 +364,191 @@ def get_user_traffic_active(
     )
 
 
-def snapshot_user_traffic_before_reload(
+def snapshot_all_users_traffic_before_reload(
     db,
-    user,
     xray_api_addr: str | None,
     timeout: float = 3.0,
-) -> bool:
-    """Atomically capture all of a user's Xray traffic and persist it to the DB.
+) -> int:
+    """Atomically capture every user's Xray traffic and persist it to the DB.
 
-    Queries Xray with reset=True, which reads AND clears every stat counter
-    matching "user>>>{username}/" in a single gRPC call.  The returned values
-    are added to user.traffic_up_bytes / traffic_down_bytes and committed.
+    A single gRPC call retrieves all per-user counters from Xray; the byte
+    deltas are aggregated by username and added to user.traffic_up_bytes /
+    user.traffic_down_bytes.  Once the DB commit succeeds, a second gRPC
+    call resets the matched counters in Xray.
 
-    Call this BEFORE apply_xray_client_changes() on any path that triggers a
-    Xray reload.  Xray's systemctl reload (SIGHUP) reinitialises the stats
-    manager and resets all in-memory counters to zero — this function ensures
-    those values are captured in the DB before the reset happens.
+    Why all users, not just the one acting on the request:  systemctl
+    reload xray (SIGHUP) reinitialises the stats manager and resets every
+    in-memory counter to zero.  When user A adds or removes a device, the
+    reload also wipes user B/C/D's accumulated live traffic — and if their
+    counters were not snapshotted into the DB beforehand, that traffic is
+    lost.  The dashboard then shows total = stored + 0 for those users,
+    which is *less* than what was previously displayed.  This bulk snapshot
+    closes that gap so cumulative traffic remains monotonic across reloads.
 
-    Using reset=True rather than a plain read prevents double-counting: the
-    counter is zeroed here, so whether or not the subsequent Xray reload also
-    resets counters, the value is stored exactly once.
+    Two-step ordering (read, commit, reset) ensures no data loss if the DB
+    commit fails: Xray's counters remain populated and will be captured on
+    the next snapshot call.  A small window of in-flight traffic between
+    the read and the reset is accepted as the trade-off — it is bounded by
+    the gRPC round-trip time and is far cheaper than losing the full counter
+    on a commit failure.
 
-    Returns True if a snapshot was taken and committed, False otherwise
-    (Xray unreachable, not configured, or zero traffic — all safe to ignore).
+    Returns the number of user rows updated, which is zero when:
+      - xray_api_addr is unset
+      - Xray is unreachable
+      - no per-user stats are reported
+      - the DB commit fails
     """
     if not xray_api_addr:
-        return False
+        return 0
 
-    username = getattr(user, "username", None)
-    if not username:
-        return False
-
-    # Fix I: read stats WITHOUT resetting first, commit to DB, then reset.
-    # Original approach (reset=True atomically): if db.commit() failed, the bytes
-    # were already cleared from Xray and lost forever with no recovery path.
-    # New approach: persist first, then clear.  Trade-off: a small amount of
-    # traffic arriving between the read and the subsequent reset call may be
-    # lost (zeroed by reset but not captured in the snapshot).  This window is
-    # milliseconds and the loss is negligible compared to losing the full counter.
-    # NOTE: if Xray's StatsService does not support non-resetting reads (i.e.
-    # reset=False always returns 0), fall back to the old reset=True approach.
-    snapshot = get_user_traffic(
-        username=username,
-        xray_api_addr=xray_api_addr,
+    raw = _call_query_stats(
+        addr=xray_api_addr,
+        pattern="user>>>",
         timeout=timeout,
-        reset=False,  # Fix I: read without clearing first
+        reset=False,
     )
-    if snapshot is None or snapshot.total_bytes == 0:
-        return False
+    if not raw:
+        return 0
 
-    user.traffic_up_bytes = (user.traffic_up_bytes or 0) + snapshot.upload_bytes
-    user.traffic_down_bytes = (user.traffic_down_bytes or 0) + snapshot.download_bytes
+    # Aggregate per-user uplink + downlink bytes from raw stat names.
+    # Stat name format produced by xray_clients.build_active_xray_clients():
+    #   user>>>{username}/{label}>>>traffic>>>uplink
+    #   user>>>{username}/{label}>>>traffic>>>downlink
+    deltas: dict[str, list[int]] = {}
+    for name, value in raw:
+        if not name.startswith("user>>>"):
+            continue
+        suffix = name[len("user>>>"):]
+        slash_idx = suffix.find("/")
+        if slash_idx <= 0:
+            continue
+        username = suffix[:slash_idx]
+        v = max(0, value)
+        if v == 0:
+            continue
+        if ">>>traffic>>>uplink" in name:
+            deltas.setdefault(username, [0, 0])[0] += v
+        elif ">>>traffic>>>downlink" in name:
+            deltas.setdefault(username, [0, 0])[1] += v
+
+    if not deltas:
+        return 0
+
+    # Local import keeps xray_stats.py importable from CLI / scripts that
+    # don't pull in the SQLAlchemy model layer up front.
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from backend.models import User  # noqa: PLC0415
+
+    users = list(
+        db.scalars(select(User).where(User.username.in_(deltas.keys())))
+    )
+
+    updated = 0
+    for u in users:
+        delta = deltas.get(u.username)
+        if not delta:
+            continue
+        up, down = delta
+        if up == 0 and down == 0:
+            continue
+        u.traffic_up_bytes = (u.traffic_up_bytes or 0) + up
+        u.traffic_down_bytes = (u.traffic_down_bytes or 0) + down
+        updated += 1
+
+    if updated == 0:
+        return 0
+
     try:
-        db.commit()  # Fix I: persist BEFORE clearing Xray counters
+        db.commit()
     except Exception:
         db.rollback()
         logger.error(
-            "xray_stats: DB commit failed for user=%s — skipping Xray counter "
-            "reset to preserve data; bytes remain in Xray and will be captured "
-            "on the next snapshot call.",
-            username,
+            "xray_stats: bulk snapshot DB commit failed — Xray counters NOT "
+            "reset, bytes remain in Xray for the next snapshot call.",
         )
-        return False
+        return 0
 
-    # Fix I: only zero Xray's counters after a confirmed DB commit.
-    # Any traffic that arrived between the read above and this reset is lost,
-    # but that window is milliseconds and far safer than losing the full snapshot.
-    get_user_traffic(
-        username=username,
-        xray_api_addr=xray_api_addr,
+    # Reset Xray's counters now that the DB has the data.
+    _call_query_stats(
+        addr=xray_api_addr,
+        pattern="user>>>",
         timeout=timeout,
         reset=True,
     )
 
     logger.info(
-        "xray_stats: snapshotted user=%s up=%d down=%d before Xray reload",
-        username, snapshot.upload_bytes, snapshot.download_bytes,
+        "xray_stats: snapshotted %d user(s) before Xray reload", updated,
     )
-    return True
+    return updated
+
+
+def monotonic_combined_traffic(
+    db,
+    user,
+    live: "UserTrafficStats | None",
+) -> "UserTrafficStats":
+    """Combine stored + live traffic with a per-user high-water guarantee.
+
+    Computes (stored + live) the same way as combined_traffic(), then clamps
+    the result against user.traffic_up/down_high_water_bytes so the displayed
+    cumulative total never decreases across calls.
+
+    When the freshly-computed total exceeds the high-water mark, the mark is
+    advanced to the new value and committed.  When it falls below — for
+    example when Xray's gRPC API briefly returns None (live=None) and the
+    computed total drops to stored only — the high-water value is returned
+    instead and the discrepancy is logged at WARNING.  This is the defensive
+    layer against transient regressions that the bulk snapshot cannot
+    prevent (e.g. an Xray crash mid-render that leaves live unreadable).
+
+    Reads with stored=0 and live=None on a brand-new user produce a
+    UserTrafficStats(0, 0, 0) with no DB write.
+    """
+    stored_up = user.traffic_up_bytes or 0
+    stored_down = user.traffic_down_bytes or 0
+
+    if live is not None:
+        computed_up = stored_up + live.upload_bytes
+        computed_down = stored_down + live.download_bytes
+    else:
+        computed_up = stored_up
+        computed_down = stored_down
+
+    hwm_up = user.traffic_up_high_water_bytes or 0
+    hwm_down = user.traffic_down_high_water_bytes or 0
+
+    if computed_up >= hwm_up and computed_down >= hwm_down:
+        if computed_up > hwm_up or computed_down > hwm_down:
+            user.traffic_up_high_water_bytes = computed_up
+            user.traffic_down_high_water_bytes = computed_down
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.warning(
+                    "xray_stats: failed to advance high-water mark for user=%s",
+                    getattr(user, "username", "?"),
+                )
+        up = computed_up
+        down = computed_down
+    else:
+        delta_up = max(0, hwm_up - computed_up)
+        delta_down = max(0, hwm_down - computed_down)
+        logger.warning(
+            "xray_stats: traffic regression for user=%s computed=(up=%d down=%d) "
+            "hwm=(up=%d down=%d) lost=(up=%d down=%d) — clamping to high-water mark",
+            getattr(user, "username", "?"),
+            computed_up, computed_down, hwm_up, hwm_down, delta_up, delta_down,
+        )
+        up = max(computed_up, hwm_up)
+        down = max(computed_down, hwm_down)
+
+    return UserTrafficStats(
+        upload_bytes=up,
+        download_bytes=down,
+        total_bytes=up + down,
+    )
 
 
 def get_device_traffic(

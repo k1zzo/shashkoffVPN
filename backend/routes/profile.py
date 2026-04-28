@@ -23,9 +23,9 @@ from backend.url_utils import build_app_url
 from backend.xray_clients import apply_xray_client_changes
 from backend.xray_config_generator import build_xray_config
 from backend.xray_stats import (
-    combined_traffic,
     get_user_traffic_active,
-    snapshot_user_traffic_before_reload,
+    monotonic_combined_traffic,
+    snapshot_all_users_traffic_before_reload,
 )
 
 router = APIRouter(tags=["profile"])
@@ -306,8 +306,8 @@ def build_happ_subscription_response(
                 "XRAY-APPLY: reason=%s token=%.8s device_id=%.24s",
                 result.xray_change_reason(), token, device_info.hwid,
             )
-            snapshot_user_traffic_before_reload(
-                db=db, user=user, xray_api_addr=settings.xray_api_addr)
+            snapshot_all_users_traffic_before_reload(
+                db=db, xray_api_addr=settings.xray_api_addr)
             apply_xray_client_changes(db, settings)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -398,9 +398,10 @@ def build_happ_subscription_response(
     # avoid double-counting deleted devices whose traffic was already snapshotted
     # into user.traffic_up/down_bytes at deletion time.
     #
-    # combined_traffic() always returns a non-None result:
-    #   - Xray available: stored + live active.
-    #   - Xray down / unconfigured: stored only (never loses persisted data).
+    # monotonic_combined_traffic() always returns a non-None result and
+    # clamps against user.traffic_*_high_water_bytes so the displayed total
+    # never decreases across calls — even when Xray is briefly unreachable
+    # (live=None) or a reload-induced live-counter reset slips through.
     _device_rows = list_active_devices(db, user.id)
     _active_labels = frozenset(d.device_id[:24] for d in _device_rows)
     _live = None
@@ -410,11 +411,7 @@ def build_happ_subscription_response(
             active_labels=_active_labels,
             xray_api_addr=settings.xray_api_addr,
         )
-    _total = combined_traffic(
-        stored_up=user.traffic_up_bytes or 0,
-        stored_down=user.traffic_down_bytes or 0,
-        live=_live,
-    )
+    _total = monotonic_combined_traffic(db=db, user=user, live=_live)
     _upload_bytes = _total.upload_bytes
     _download_bytes = _total.download_bytes
     # ─────────────────────────────────────────────────────────────────────────

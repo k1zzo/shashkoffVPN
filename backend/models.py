@@ -33,6 +33,14 @@ class User(Base):
     )
     traffic_up_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     traffic_down_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # High-water mark for the displayed cumulative traffic. Updated on every
+    # read when the freshly-computed total (stored + live) exceeds it; clamped
+    # against on every read so the dashboard total can never decrease across
+    # calls. Defends against transient regressions when Xray's gRPC API is
+    # briefly unreachable or when a reload-induced live-counter reset leaves
+    # the DB momentarily lower than the previously displayed value.
+    traffic_up_high_water_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    traffic_down_high_water_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     devices: Mapped[list["Device"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

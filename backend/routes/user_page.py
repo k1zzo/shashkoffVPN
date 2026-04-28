@@ -23,7 +23,7 @@ from backend.subscription_utils import (
     build_subscription_url,
     is_happ_request,
 )
-from backend.xray_stats import combined_traffic, format_bytes, get_user_traffic_active
+from backend.xray_stats import format_bytes, get_user_traffic_active, monotonic_combined_traffic
 
 router = APIRouter(tags=["user-page"])
 settings = get_settings()
@@ -152,9 +152,11 @@ def render_user_page(
     # labels only, so deleted devices' counters are never double-counted with
     # the stored historical totals.
     #
-    # combined_traffic() always returns a UserTrafficStats (never None):
-    #   - When Xray is available: stored + live.
-    #   - When Xray is down or not configured: stored only.
+    # monotonic_combined_traffic() always returns a UserTrafficStats (never
+    # None) and clamps the result against the user's high-water mark so the
+    # displayed total can never decrease across calls — defends against
+    # transient Xray gRPC failures (live=None) and reload-induced live-counter
+    # resets that slip through the bulk snapshot.
     # Both cases produce "0 B / ∞" for a brand new user (stored=0, live=0/None).
     _active_labels = frozenset(d.device_id[:24] for d in device_rows)
     _live = None
@@ -164,11 +166,7 @@ def render_user_page(
             active_labels=_active_labels,
             xray_api_addr=settings.xray_api_addr,
         )
-    _total = combined_traffic(
-        stored_up=user.traffic_up_bytes or 0,
-        stored_down=user.traffic_down_bytes or 0,
-        live=_live,
-    )
+    _total = monotonic_combined_traffic(db=db, user=user, live=_live)
     traffic_used = format_bytes(_total.total_bytes)
     traffic_summary = f"{traffic_used} / ∞"
     # ─────────────────────────────────────────────────────────────────────────
