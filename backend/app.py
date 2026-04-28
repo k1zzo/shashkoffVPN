@@ -13,7 +13,6 @@ from backend.routes.devices import router as devices_router
 from backend.routes.health import router as health_router
 from backend.routes.profile import router as profile_router
 from backend.routes.user_page import router as user_page_router
-from backend.seed import seed_data
 
 settings = get_settings()
 
@@ -22,7 +21,6 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     init_db()
     upgrade_db_schema()
-    seed_data()
     app.state.templates = Jinja2Templates(directory=str(settings.templates_dir))
     yield
 

@@ -64,7 +64,7 @@ uvicorn backend.app:app --reload
 
 Open:
 - `http://127.0.0.1:8000/health`
-- `http://127.0.0.1:8000/demo-token`
+- `http://127.0.0.1:8000/{token}` — replace `{token}` with a token created via `python -m backend.cli create-user`
 
 ## Tests
 
@@ -346,18 +346,28 @@ VPN_TRANSPORT=tcp
 
 ## Post-deploy verification
 
+Create a user first, then substitute its token below:
+
 ```bash
+python -m backend.cli create-user --username alice
+# → prints token, e.g. abc123xyz
+
 curl -i https://vpn.your-domain.com/health
-curl -i https://vpn.your-domain.com/demo-token
+curl -i https://vpn.your-domain.com/abc123xyz
 ```
 
 ## Manual endpoint testing (local)
 
+Create a user first, then substitute its token below:
+
 ```bash
+python -m backend.cli create-user --username alice
+# → prints token, e.g. abc123xyz
+
 curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/demo-token
+curl http://127.0.0.1:8000/abc123xyz
 
 curl -s -X POST http://127.0.0.1:8000/api/device/register \
   -H "Content-Type: application/json" \
-  -d '{"token":"demo-token","device_id":"my-device-1","device_name":"MacBook","platform":"macOS"}'
+  -d '{"token":"abc123xyz","device_id":"my-device-1","device_name":"MacBook","platform":"macOS"}'
 ```
