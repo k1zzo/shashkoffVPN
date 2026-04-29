@@ -12,6 +12,7 @@ Commands:
     extend-user     Extend expiry by N days from today (or from current expiry)
     set-expiry      Set exact expiry datetime (ISO 8601) or clear it
     reset-token     Replace a user's public_token
+    delete-user     Permanently delete a user and all their devices
 """
 
 from __future__ import annotations
@@ -24,10 +25,12 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
+from backend.config import get_settings
 from backend.db import init_db, session_scope
 from backend.models import User
 from backend.queries import count_active_devices, is_user_accessible
 from backend.reserved import is_token_reserved
+from backend.xray_clients import apply_xray_client_changes
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +236,44 @@ def cmd_reset_token(args: argparse.Namespace) -> None:
         print(f"User '{user.username}' token changed: {old_token} → {new_token}")
 
 
+def cmd_delete_user(args: argparse.Namespace) -> None:
+    with session_scope() as db:
+        user = _require_user(db, args.token)
+        active = count_active_devices(db, user.id)
+        device_count = len(user.devices)
+        username = user.username
+        token = user.public_token
+
+        print(f"About to permanently delete user '{username}':")
+        _print_user(user, active)
+
+        if not args.yes:
+            try:
+                entered = input("Type the username to confirm deletion: ")
+            except EOFError:
+                entered = ""
+            if entered != username:
+                print("Aborted: confirmation did not match the username.", file=sys.stderr)
+                sys.exit(1)
+
+        db.delete(user)
+        db.commit()
+
+        try:
+            apply_xray_client_changes(db, get_settings())
+        except Exception as exc:  # noqa: BLE001 — defensive; function should not raise
+            print(
+                f"Warning: user deleted, but Xray reload failed: {exc}. "
+                "Reload Xray manually to revoke active sessions.",
+                file=sys.stderr,
+            )
+
+        print(
+            f"User '{username}' (token {token}) deleted. "
+            f"Removed {device_count} devices."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -286,6 +327,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token", required=True, help="Current public token")
     p.add_argument("--new-token", default="", help="New token value (auto-generated if omitted)")
 
+    # delete-user
+    p = sub.add_parser("delete-user", help="Permanently delete a user and all their devices")
+    p.add_argument("--token", required=True, help="User's public token")
+    p.add_argument("--yes", action="store_true", help="Skip the interactive confirmation prompt")
+
     return parser
 
 
@@ -313,6 +359,7 @@ def main() -> None:
         "extend-user": cmd_extend_user,
         "set-expiry": cmd_set_expiry,
         "reset-token": cmd_reset_token,
+        "delete-user": cmd_delete_user,
     }
     handlers[args.command](args)
 

@@ -51,6 +51,10 @@ python -m backend.cli set-expiry --token alice-token --expires-at never
 
 # Replace token
 python -m backend.cli reset-token --token old-token --new-token new-token
+
+# Permanently delete a user (and all their devices). Prompts for confirmation.
+python -m backend.cli delete-user --token alice-token
+python -m backend.cli delete-user --token alice-token --yes
 ```
 
 ## Local development
