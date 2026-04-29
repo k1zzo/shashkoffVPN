@@ -13,14 +13,21 @@ from backend.config import Settings
 
 # ── Geosite / geoip groups ──────────────────────────────────────────────────
 
-BLOCK_GEOSITES = ["geosite:win-spy", "geosite:category-ads"]
+BLOCK_GEOSITES = ["geosite:win-spy", "geosite:category-ads-all"]
 BITTORRENT_PROTOCOLS = ["bittorrent"]
-PROXY_GEOSITES = ["geosite:github", "geosite:youtube", "geosite:telegram"]
+PROXY_GEOSITES = [
+    "geosite:github",
+    "geosite:youtube",
+    "geosite:telegram",
+    "geosite:google",
+    "geosite:netflix",
+    "geosite:openai",
+    "geosite:meta",
+]
 DIRECT_GEOSITES = [
-    "geosite:private",
     "geosite:category-ru",
-    "geosite:microsoft",
     "geosite:apple",
+    "geosite:microsoft",
     "geosite:google-play",
     "geosite:epicgames",
     "geosite:riot",
@@ -28,9 +35,24 @@ DIRECT_GEOSITES = [
 ]
 DIRECT_GEOIPS = ["geoip:private", "geoip:ru"]
 
-DNS_PROXY_GEOSITES = ["geosite:github", "geosite:youtube", "geosite:telegram"]
+DNS_PROXY_GEOSITES = [
+    "geosite:github",
+    "geosite:youtube",
+    "geosite:telegram",
+    "geosite:google",
+    "geosite:netflix",
+    "geosite:openai",
+    "geosite:meta",
+]
 DNS_DIRECT_GEOSITES = ["geosite:category-ru", "geosite:private"]
-DNS_DIRECT_EXPECTED_GEOIPS = ["geoip:ru"]
+
+GOV_DOMAINS = ["domain:nalog.ru", "domain:gosuslugi.ru"]
+
+DNS_HOSTS = {
+    "domain:googleapis.cn": "googleapis.com",
+    "lkfl2.nalog.ru": "213.24.64.175",
+    "lknpd.nalog.ru": "213.24.64.181",
+}
 
 
 def build_xray_config(
@@ -40,6 +62,8 @@ def build_xray_config(
     """Build a full Xray JSON config for Happ's custom tunnel feature."""
     config: dict[str, Any] = {
         "dns": {
+            "tag": "dns-in",
+            "hosts": dict(DNS_HOSTS),
             "queryStrategy": "UseIPv4",
             "servers": [
                 "https://1.1.1.1/dns-query",
@@ -48,9 +72,8 @@ def build_xray_config(
                     "domains": list(DNS_PROXY_GEOSITES),
                 },
                 {
-                    "address": "76.76.10.41",
-                    "domains": list(DNS_DIRECT_GEOSITES),
-                    "expectedIPs": list(DNS_DIRECT_EXPECTED_GEOIPS),
+                    "address": "https://77.88.8.8/dns-query",
+                    "domains": list(DNS_DIRECT_GEOSITES) + list(GOV_DOMAINS),
                     "skipFallback": True,
                 },
             ],
@@ -61,10 +84,10 @@ def build_xray_config(
                 "port": 10808,
                 "listen": "127.0.0.1",
                 "protocol": "socks",
-                "settings": {"udp": True, "auth": "noauth"},
+                "settings": {"udp": True, "auth": "noauth", "userLevel": 8},
                 "sniffing": {
                     "enabled": True,
-                    "routeOnly": False,
+                    "routeOnly": True,
                     "destOverride": ["http", "tls", "quic"],
                 },
             },
@@ -73,10 +96,10 @@ def build_xray_config(
                 "port": 10809,
                 "listen": "127.0.0.1",
                 "protocol": "http",
-                "settings": {"allowTransparent": False},
+                "settings": {"allowTransparent": False, "userLevel": 8},
                 "sniffing": {
                     "enabled": True,
-                    "routeOnly": False,
+                    "routeOnly": True,
                     "destOverride": ["http", "tls", "quic"],
                 },
             },
@@ -113,25 +136,17 @@ def build_xray_config(
                     "tcpSettings": {},
                 },
             },
-            {"tag": "direct", "protocol": "freedom"},
-            {"tag": "block", "protocol": "blackhole"},
             {
-                "tag": "fragment",
+                "tag": "direct",
                 "protocol": "freedom",
-                "settings": {
-                    "fragment": {
-                        "interval": "10-20",
-                        "length": "50-100",
-                        "maxSplit": "100-200",
-                        "packets": "1-3",
-                    }
-                },
-                "streamSettings": {
-                    "network": "raw",
-                    "security": "",
-                    "sockopt": {"mark": 255, "TcpNoDelay": True},
-                },
+                "settings": {"domainStrategy": "UseIPv4"},
             },
+            {
+                "tag": "block",
+                "protocol": "blackhole",
+                "settings": {"response": {"type": "http"}},
+            },
+            {"tag": "dns-out", "protocol": "dns"},
         ],
         "routing": {
             "domainMatcher": "hybrid",
@@ -139,12 +154,17 @@ def build_xray_config(
             "rules": [
                 {
                     "type": "field",
-                    "domain": list(BLOCK_GEOSITES),
-                    "outboundTag": "block",
+                    "inboundTag": ["dns-in"],
+                    "outboundTag": "dns-out",
                 },
                 {
                     "type": "field",
                     "protocol": list(BITTORRENT_PROTOCOLS),
+                    "outboundTag": "block",
+                },
+                {
+                    "type": "field",
+                    "domain": list(BLOCK_GEOSITES),
                     "outboundTag": "block",
                 },
                 {
@@ -154,7 +174,7 @@ def build_xray_config(
                 },
                 {
                     "type": "field",
-                    "domain": list(DIRECT_GEOSITES),
+                    "domain": list(DIRECT_GEOSITES) + list(GOV_DOMAINS),
                     "outboundTag": "direct",
                 },
                 {
