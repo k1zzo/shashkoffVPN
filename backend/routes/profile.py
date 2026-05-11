@@ -22,6 +22,7 @@ from backend.subscription_utils import build_subscription_url, build_vless_url
 from backend.url_utils import build_app_url
 from backend.xray_clients import apply_xray_client_changes
 from backend.xray_config_generator import build_xray_config
+from backend.xray_handler_api import XrayApiError, XrayApiUnavailable
 from backend.xray_stats import (
     get_user_traffic_active,
     monotonic_combined_traffic,
@@ -308,7 +309,32 @@ def build_happ_subscription_response(
             )
             snapshot_all_users_traffic_before_reload(
                 db=db, xray_api_addr=settings.xray_api_addr)
-            apply_xray_client_changes(db, settings)
+            try:
+                apply_xray_client_changes(db, settings)
+            except XrayApiUnavailable as exc:
+                # Transient — keep the DB row staged, on-disk snapshot is
+                # already written, reconciler will converge runtime state.
+                logger.warning(
+                    "happ register: Xray API unavailable, proceeding with DB-only update: %s",
+                    exc,
+                )
+            except XrayApiError as exc:
+                # Logical failure — roll back the device row so DB and
+                # runtime stay consistent.
+                db.rollback()
+                logger.error(
+                    "happ register: Xray apply failed, rolling back: %s",
+                    exc,
+                )
+                return _error_response(
+                    500, "Xray runtime update failed; device was not registered"
+                )
+            db.commit()
+        else:
+            # No Xray work to do — but we still flushed staged updates
+            # (metadata, last_seen_at) inside register_or_update_happ_device.
+            # Commit them here so they persist.
+            db.commit()
     # ─────────────────────────────────────────────────────────────────────────
 
     profile_title = b64encode(

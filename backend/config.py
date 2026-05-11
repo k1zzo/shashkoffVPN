@@ -164,6 +164,11 @@ class Settings:
     # this address when serving the user cabinet and Happ subscription to report
     # real total traffic usage instead of a hardcoded 0.
     #
+    # The SAME address is used for the HandlerService client management API
+    # (see backend/xray_handler_api.py) — both services live on the same
+    # gRPC endpoint when Xray is configured with
+    #   "api": {"tag": "api", "services": ["HandlerService", "StatsService"]}
+    #
     # Xray must be configured with stats enabled (see CLAUDE.md § Xray stats).
     # In Docker deployments the address must be reachable from inside the
     # container — typically the host's Docker bridge IP, e.g. 172.17.0.1:10085.
@@ -176,7 +181,28 @@ class Settings:
     #
     # If unset, traffic stats are reported as "N/A" in the cabinet and the
     # subscription-userinfo upload/download fields remain 0 (honest: unknown).
+    # HandlerService is also disabled when this is unset — legacy reload path
+    # is used as the fallback.
     xray_api_addr: str | None
+    # ── Xray HandlerService (live client management) ─────────────────────────
+    # The VLESS inbound tag used in HandlerService.AlterInbound calls. Must
+    # match the ``tag`` field of the VLESS Reality inbound in config.base.json.
+    # Default: "vless-reality-in".
+    xray_vless_inbound_tag: str
+    # When True (default), backend/xray_clients.py applies device changes via
+    # the HandlerService gRPC API (no full Xray restart, active sessions
+    # preserved). When False, falls back to the legacy XRAY_RELOAD_COMMAND
+    # path. Effectively no-op when xray_api_addr is unset, because the API
+    # endpoint is required for HandlerService.
+    xray_use_handler_api: bool
+    # How often the reconciler compares DB state to Xray live state, in
+    # seconds. The reconciler reaps drift (e.g. UUIDs Xray has but the DB no
+    # longer wants, including expired users). Lower = tighter convergence,
+    # higher = less load. Default: 60.
+    xray_reconciler_interval: int
+    # Per-call timeout for HandlerService gRPC requests, in seconds. Applied
+    # to add_user / remove_user / list_users. Default: 5.
+    xray_handler_api_timeout: int
     # ── Temporary diagnostics ─────────────────────────────────────────────────
     # When debug_happ_sub_requests is True, /{token} logs full request
     # metadata (headers, query params, IP) to the "happ.sub.diag" logger.
@@ -240,6 +266,14 @@ class Settings:
         xray_api_addr_raw = os.getenv("XRAY_API_ADDR", "").strip()
         xray_api_addr = xray_api_addr_raw if xray_api_addr_raw else None
 
+        xray_vless_inbound_tag = (
+            os.getenv("XRAY_VLESS_INBOUND_TAG", "").strip() or "vless-reality-in"
+        )
+        use_handler_raw = os.getenv("XRAY_USE_HANDLER_API", "true").strip().lower()
+        xray_use_handler_api = use_handler_raw not in ("0", "false", "no")
+        xray_reconciler_interval = _env_int("XRAY_RECONCILER_INTERVAL_SECONDS", 60)
+        xray_handler_api_timeout = _env_int("XRAY_HANDLER_API_TIMEOUT_SECONDS", 5)
+
         return cls(
             app_name=os.getenv("APP_NAME", "SHASHKOFFVPN"),
             environment=os.getenv("APP_ENV", "development"),
@@ -273,6 +307,10 @@ class Settings:
             xray_reload_timeout=xray_reload_timeout,
             xray_reload_via_watcher=xray_reload_via_watcher,
             xray_api_addr=xray_api_addr,
+            xray_vless_inbound_tag=xray_vless_inbound_tag,
+            xray_use_handler_api=xray_use_handler_api,
+            xray_reconciler_interval=xray_reconciler_interval,
+            xray_handler_api_timeout=xray_handler_api_timeout,
         )
 
 

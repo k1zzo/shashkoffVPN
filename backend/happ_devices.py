@@ -13,6 +13,10 @@ Key invariants:
   explicit boolean flags (created_new, reactivated, uuid_backfilled). Callers
   MUST use result.active_client_set_changed to decide whether to call
   apply_xray_client_changes() — never add implicit conditions in the caller.
+- register_or_update_happ_device() FLUSHES the session but does NOT commit.
+  The caller commits after apply_xray_client_changes succeeds so the DB
+  write and Xray runtime application are atomic from the operator's
+  perspective — an XrayApiError rolls back the device row too.
 """
 
 from __future__ import annotations
@@ -227,7 +231,11 @@ def register_or_update_happ_device(
         # Never rotate an existing UUID — stable credential for active devices.
         if uuid_backfilled:
             existing.device_uuid = str(uuid4())
-        db.commit()
+        # Flush staged writes so build_active_xray_clients (called later by
+        # the route's apply_xray_client_changes) sees the new state. We do
+        # NOT commit here — the caller commits after Xray runtime apply
+        # succeeds so a failed runtime apply rolls this row back.
+        db.flush()
         return HappRegistrationResult(
             device=existing,
             created_new=False,
@@ -248,7 +256,7 @@ def register_or_update_happ_device(
         is_active=True,
     )
     db.add(device)
-    db.commit()
+    db.flush()
     return HappRegistrationResult(
         device=device,
         created_new=True,

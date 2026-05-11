@@ -55,7 +55,44 @@ python -m backend.cli reset-token --token old-token --new-token new-token
 # Permanently delete a user (and all their devices). Prompts for confirmation.
 python -m backend.cli delete-user --token alice-token
 python -m backend.cli delete-user --token alice-token --yes
+
+# Inspect drift between the DB and the running Xray instance, or apply it once.
+python -m backend.cli xray-state
+python -m backend.cli xray-reconcile
 ```
+
+## Xray live client management (no full restart)
+
+Device add/remove operations apply to the running Xray process via gRPC
+HandlerService. Other users' active VPN sessions are not interrupted.
+
+Three layers cooperate:
+
+1. **On-disk snapshot** (`data/xray-clients.json`) — always written first.
+   Cold-start source of truth for Xray.
+2. **HandlerService gRPC API** — applies the desired diff at runtime when
+   `XRAY_USE_HANDLER_API=true` (default) and `XRAY_API_ADDR` is set.
+3. **Reconciler** — background task in the FastAPI lifespan, ticks every
+   `XRAY_RECONCILER_INTERVAL_SECONDS` (default 60). Detects drift and
+   re-applies. Also reaps users whose `expires_at` has passed.
+
+Env vars (see `.env.example`):
+
+| Variable | Default | Notes |
+|---|---|---|
+| `XRAY_API_ADDR` | unset | Same gRPC endpoint as StatsService. Required to enable HandlerService. |
+| `XRAY_VLESS_INBOUND_TAG` | `vless-reality-in` | Must match the `tag` of the VLESS inbound in `config.base.json`. |
+| `XRAY_USE_HANDLER_API` | `true` | Set to `false` to roll back to the legacy restart-Xray reload path. |
+| `XRAY_RECONCILER_INTERVAL_SECONDS` | `60` | How often the reconciler runs. |
+| `XRAY_HANDLER_API_TIMEOUT_SECONDS` | `5` | Per-call gRPC timeout. |
+
+**Expiry change (behavior-affecting):** after this update, a user whose
+`expires_at` has passed loses VPN access automatically within one
+reconciler interval. The previous behavior left the running tunnel
+intact until the user reconnected manually. Restore access with
+`extend-user` — the reconciler will re-add the UUID on its next pass.
+
+See `deploy/README.md` for the operational checklist.
 
 ## Local development
 

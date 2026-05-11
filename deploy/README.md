@@ -234,3 +234,117 @@ sudo systemctl restart shashkoffvpn-xray-watcher.path
 ```
 
 `reload` не рвёт активные коннекты, в отличие от `restart`.
+
+## HandlerService live client management
+
+Начиная с этой версии, добавление/удаление устройств применяется к
+живому процессу Xray через gRPC HandlerService, без `systemctl restart`.
+Активные коннекты других пользователей не прерываются.
+
+### Что обязательно поменять в Xray-конфиге
+
+1. В блоке `api` подключить `HandlerService` рядом со `StatsService`:
+   ```json
+   "api": { "tag": "api", "services": ["HandlerService", "StatsService"] }
+   ```
+2. У VLESS Reality inbound должен быть стабильный `tag`. По умолчанию
+   приложение использует `vless-reality-in` (см. `XRAY_VLESS_INBOUND_TAG`).
+   В `deploy/config.base.json.example` это уже выставлено.
+
+После правки `config.base.json` один раз перезапусти Xray (только в этот
+переход; все последующие изменения клиентов уже не требуют рестарта):
+```bash
+sudo systemctl restart xray
+```
+
+### Что обязательно поменять в `.env`
+
+```
+XRAY_API_ADDR=172.18.0.1:10085         # тот же, что и для StatsService
+XRAY_VLESS_INBOUND_TAG=vless-reality-in
+XRAY_USE_HANDLER_API=true              # default
+XRAY_RECONCILER_INTERVAL_SECONDS=60    # default
+XRAY_HANDLER_API_TIMEOUT_SECONDS=5     # default
+```
+
+### Архитектура (defense in depth)
+
+1. **Диск:** `apply_xray_client_changes` всегда пишет `data/xray-clients.json`
+   — это снимок для холодного старта Xray и для legacy watcher-пути.
+2. **Runtime (HandlerService):** на каждое изменение устройства приложение
+   делает `list_users` → diff → `add_user`/`remove_user`. Делает это
+   ДО `db.commit()`: если gRPC упал с `XrayApiError`, транзакция
+   откатывается и роут возвращает 500. На `XrayApiUnavailable` (Xray
+   ненадолго недоступен) — коммит проходит, файл-снимок свежий,
+   синхронизация дойдёт через reconciler.
+3. **Reconciler:** фоновая задача в lifespan FastAPI, тикает каждые
+   `XRAY_RECONCILER_INTERVAL_SECONDS`. Сравнивает желаемое состояние
+   (БД, с фильтром по `expires_at`) с тем, что реально в Xray, и
+   доводит разницу. Лечит дрейф после простоев, ручных правок и
+   истечения подписок.
+
+### Legacy reload остаётся в коде
+
+`shashkoffvpn-reload-xray.sh` НЕ удалён — он нужен для редких правок
+`config.base.json` (новые routing-правила, смена ключей). Watcher тоже
+жив и работает как раньше: запускает merge+systemctl reload при
+изменении `xray-clients.json`. Для штатных операций с устройствами он
+теперь избыточен — HandlerService применяет всё мгновенно. Если хочется
+полностью отключить watcher для операций с клиентами, оставь
+`XRAY_USE_HANDLER_API=true` (default) — приложение само не дёргает
+reload, watcher всё равно отреагирует на `xray-clients.json`, но это
+безопасно: при `reload` (а не `restart`) активные коннекты не рвутся.
+
+### Откат
+
+Если что-то пошло не так:
+```
+# в .env
+XRAY_USE_HANDLER_API=false
+```
+Перезапусти контейнер:
+```bash
+cd /opt/shashkoffVPN/docker && sudo docker compose restart app
+```
+Поведение возвращается к legacy: `apply_xray_client_changes` пишет
+файл-снимок, watcher merge+`systemctl restart xray`. Активные коннекты
+снова рвутся при каждом изменении устройства — но всё работает как до
+миграции.
+
+### Побочный эффект: истёкшие пользователи
+
+Раньше `User.expires_at` не учитывался в `build_active_xray_clients`,
+поэтому пользователи с просроченной подпиской продолжали ходить через
+VPN до ручного переподключения. Теперь:
+
+- `build_active_xray_clients` сразу исключает таких пользователей.
+- Reconciler в течение одного интервала (по умолчанию 60 секунд)
+  выпишет их UUID из живого Xray.
+- Активная VPN-сессия истёкшего пользователя обрывается — это
+  правильное поведение срока действия. Операторов предупредить!
+
+Восстановить доступ: `python -m backend.cli extend-user --token ...`
+— одна запись в БД, новый reconciler-тик вернёт UUID в Xray.
+
+### CLI диагностика
+
+```bash
+# Сравнить DB и Xray, увидеть дрейф
+docker exec -it shashkoffvpn-app python -m backend.cli xray-state
+
+# Применить дрейф один раз (то же, что один тик reconciler)
+docker exec -it shashkoffvpn-app python -m backend.cli xray-reconcile
+```
+
+### Генерация proto-стабов (опционально)
+
+`backend/xray_handler_api.py` сам кодирует/декодирует нужные protobuf-
+сообщения вручную (как и `xray_stats.py`) — никакой кодогенерации в
+рантайме не требуется. Скрипт `deploy/generate_xray_protos.sh` есть
+для тех, кому захочется добавить новые RPC из HandlerService:
+
+```bash
+pip install "grpcio-tools>=1.50,<2.0"
+bash deploy/generate_xray_protos.sh
+# Сгенерированные модули появятся в backend/xray_proto/.
+```

@@ -21,6 +21,7 @@ from backend.queries import (
     is_user_accessible,
 )
 from backend.xray_clients import apply_xray_client_changes
+from backend.xray_handler_api import XrayApiError, XrayApiUnavailable
 from backend.xray_stats import snapshot_all_users_traffic_before_reload
 
 settings = get_settings()
@@ -91,20 +92,39 @@ def register_device(
         existing_device.is_active = True
         if uuid_backfilled:
             existing_device.device_uuid = str(uuid4())
-        db.commit()
 
-        # Only reload Xray when the active client set actually changed.
-        # Metadata-only updates (name/platform/last_seen_at) on a known active
-        # device must NOT trigger apply_xray_client_changes.
+        # Apply Xray runtime changes BEFORE commit so a failed gRPC call can
+        # roll back the device row atomically.  Metadata-only updates skip
+        # the apply entirely.
         if uuid_backfilled or was_inactive:
             reason = "uuid_backfilled" if uuid_backfilled else "reactivated"
             logger.info(
                 "XRAY-APPLY: reason=%s token=%.8s device_id=%.24s",
                 reason, token, device_id,
             )
+            db.flush()  # so apply_xray_client_changes sees pending writes
             snapshot_all_users_traffic_before_reload(db=db, xray_api_addr=settings.xray_api_addr)
-            apply_xray_client_changes(db, settings)
+            try:
+                apply_xray_client_changes(db, settings)
+            except XrayApiUnavailable as exc:
+                # Transient — keep DB write, on-disk snapshot already written
+                # by apply_xray_client_changes, reconciler will converge later.
+                logger.warning(
+                    "device register: Xray API unavailable, proceeding with DB-only update: %s",
+                    exc,
+                )
+            except XrayApiError as exc:
+                db.rollback()
+                logger.error(
+                    "device register: Xray apply failed, rolling back: %s",
+                    exc,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={"detail": "Xray runtime update failed; device was not registered"},
+                )
 
+        db.commit()
         return JSONResponse(
             content={
                 "detail": "device already registered",
@@ -131,14 +151,31 @@ def register_device(
             is_active=True,
         )
     )
-    db.commit()
+    db.flush()
     logger.info(
         "XRAY-APPLY: reason=new_device token=%.8s device_id=%.24s",
         token, device_id,
     )
     snapshot_all_users_traffic_before_reload(db=db, xray_api_addr=settings.xray_api_addr)
-    apply_xray_client_changes(db, settings)
+    try:
+        apply_xray_client_changes(db, settings)
+    except XrayApiUnavailable as exc:
+        logger.warning(
+            "device register: Xray API unavailable, proceeding with DB-only insert: %s",
+            exc,
+        )
+    except XrayApiError as exc:
+        db.rollback()
+        logger.error(
+            "device register: Xray apply failed, rolling back: %s",
+            exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Xray runtime update failed; device was not registered"},
+        )
 
+    db.commit()
     return JSONResponse(
         content={
             "detail": "device registered",
@@ -176,12 +213,11 @@ def remove_device(
 
     # ── Traffic snapshot ──────────────────────────────────────────────────────
     # Capture ALL active users' current Xray traffic before the reload that
-    # follows device removal.  `systemctl reload xray` (SIGHUP) reinitialises
-    # Xray's stats manager and resets every in-memory counter to zero — for
-    # every user, not just the one acting on this request.  Without a bulk
-    # snapshot, other users' accumulated live traffic is silently destroyed
-    # on each reload, which produces visible regressions in their dashboards
-    # ("10 GB → refresh → 8 GB → refresh → 11 GB").
+    # may follow device removal (legacy path only).  With HandlerService the
+    # snapshot is a cheap defensive measure — other users' counters are not
+    # reset on a per-device add/remove, but a legacy fallback reload would
+    # wipe them.  Running this once unconditionally keeps the code path
+    # consistent across deployments.
     #
     # If Xray is unreachable, we proceed and accept that the pre-reload traffic
     # is not captured for this cycle — honest limitation, not a crash.
@@ -191,17 +227,35 @@ def remove_device(
     )
     # ─────────────────────────────────────────────────────────────────────────
 
-    deactivate_device(db, device)
-    # Rebuild Xray clients config to exclude this device's UUID.
-    # After Xray is reloaded, the device_uuid is no longer accepted → real VPN
-    # access revocation. Without Xray reload the config file is correct but the
-    # running Xray process still holds the old client set in memory.
+    # Stage the deactivation but do NOT commit yet — the runtime apply runs
+    # first so a failed gRPC call can roll the row back.
+    device.is_active = False
+    device.last_seen_at = datetime.now(timezone.utc).replace(tzinfo=None)  # Fix J
+    db.flush()
+
     logger.info(
         "XRAY-APPLY: reason=device_deleted token=%.8s device_id=%.24s",
         token, device_id,
     )
-    apply_xray_client_changes(db, settings)
+    try:
+        apply_xray_client_changes(db, settings)
+    except XrayApiUnavailable as exc:
+        logger.warning(
+            "device remove: Xray API unavailable, proceeding with DB-only update: %s",
+            exc,
+        )
+    except XrayApiError as exc:
+        db.rollback()
+        logger.error(
+            "device remove: Xray apply failed, rolling back: %s",
+            exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Xray runtime update failed; device was not removed"},
+        )
 
+    db.commit()
     active_device_count = count_active_devices(db, user.id)
 
     return JSONResponse(

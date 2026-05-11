@@ -4,7 +4,7 @@
   },
   "api": {
     "tag": "api",
-    "services": ["StatsService"]
+    "services": ["HandlerService", "StatsService"]
   },
   "stats": {},
   "policy": {
@@ -31,7 +31,7 @@
       }
     },
     {
-      "tag": "VLESS Reality",
+      "tag": "vless-reality-in",
       "listen": "127.0.0.1",
       "port": 8444,
       "protocol": "vless",

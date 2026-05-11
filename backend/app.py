@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -13,8 +15,10 @@ from backend.routes.devices import router as devices_router
 from backend.routes.health import router as health_router
 from backend.routes.profile import router as profile_router
 from backend.routes.user_page import router as user_page_router
+from backend.xray_reconciler import reconciler_loop
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -22,7 +26,31 @@ async def lifespan(app: FastAPI):
     init_db()
     upgrade_db_schema()
     app.state.templates = Jinja2Templates(directory=str(settings.templates_dir))
-    yield
+
+    # Background reconciler — converges Xray runtime state to the DB every
+    # XRAY_RECONCILER_INTERVAL_SECONDS. The loop is a no-op when
+    # XRAY_USE_HANDLER_API=false or XRAY_API_ADDR is unset (logged once).
+    stop_event = asyncio.Event()
+    reconciler_task = asyncio.create_task(
+        reconciler_loop(settings, stop_event),
+        name="xray-reconciler",
+    )
+    app.state.xray_reconciler_stop = stop_event
+    app.state.xray_reconciler_task = reconciler_task
+
+    try:
+        yield
+    finally:
+        stop_event.set()
+        try:
+            await asyncio.wait_for(reconciler_task, timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("xray_reconciler: shutdown timed out, cancelling")
+            reconciler_task.cancel()
+            try:
+                await reconciler_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

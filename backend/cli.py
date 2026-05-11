@@ -4,15 +4,17 @@ Usage:
     python -m backend.cli <command> [options]
 
 Commands:
-    create-user     Create a new user
-    list-users      List all users
-    get-user        Show details for a single user
-    activate-user   Set is_active=True for a user
-    deactivate-user Set is_active=False for a user
-    extend-user     Extend expiry by N days from today (or from current expiry)
-    set-expiry      Set exact expiry datetime (ISO 8601) or clear it
-    reset-token     Replace a user's public_token
-    delete-user     Permanently delete a user and all their devices
+    create-user      Create a new user
+    list-users       List all users
+    get-user         Show details for a single user
+    activate-user    Set is_active=True for a user
+    deactivate-user  Set is_active=False for a user
+    extend-user      Extend expiry by N days from today (or from current expiry)
+    set-expiry       Set exact expiry datetime (ISO 8601) or clear it
+    reset-token      Replace a user's public_token
+    delete-user      Permanently delete a user and all their devices
+    xray-state       Show DB vs Xray HandlerService comparison and drift
+    xray-reconcile   Run the reconciler once and apply any drift
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from backend.models import User
 from backend.queries import count_active_devices, is_user_accessible
 from backend.reserved import is_token_reserved
 from backend.xray_clients import apply_xray_client_changes
+from backend.xray_handler_api import XrayApiError, XrayApiUnavailable
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +239,81 @@ def cmd_reset_token(args: argparse.Namespace) -> None:
         print(f"User '{user.username}' token changed: {old_token} → {new_token}")
 
 
+def cmd_xray_state(args: argparse.Namespace) -> None:  # noqa: ARG001
+    """Print a side-by-side comparison of DB-desired and Xray-live client sets.
+
+    Useful for debugging drift: shows how many entries each side has, the
+    intersection size, and the first N UUIDs that are missing on either side.
+    """
+    from backend.xray_clients import _build_uuid_to_email_map, build_desired_runtime_state
+    from backend.xray_handler_api import list_users
+
+    settings = get_settings()
+    addr = settings.xray_api_addr
+    tag = settings.xray_vless_inbound_tag
+    timeout = float(settings.xray_handler_api_timeout)
+
+    print(f"XRAY_API_ADDR          : {addr or '(unset)'}")
+    print(f"XRAY_VLESS_INBOUND_TAG : {tag}")
+    print(f"XRAY_USE_HANDLER_API   : {settings.xray_use_handler_api}")
+    print()
+
+    with session_scope() as db:
+        desired = build_desired_runtime_state(db)
+        email_by_uuid = _build_uuid_to_email_map(db)
+    email_by_uuid.update(desired)
+    desired_ids = set(desired.keys())
+
+    print(f"DB-desired entries : {len(desired_ids)}")
+
+    if not addr or not settings.xray_use_handler_api:
+        print("Xray HandlerService is not configured — drift comparison skipped.")
+        return
+
+    try:
+        live = list_users(addr=addr, inbound_tag=tag, timeout=timeout)
+    except XrayApiUnavailable as exc:
+        print(f"Xray API unavailable: {exc}")
+        sys.exit(2)
+    except XrayApiError as exc:
+        print(f"Xray API error: {exc}")
+        sys.exit(2)
+
+    print(f"Xray-live entries  : {len(live)}")
+    to_add = desired_ids - live
+    to_remove = live - desired_ids
+    print(f"Drift              : +{len(to_add)} -{len(to_remove)}")
+
+    sample = 10
+    if to_add:
+        print(f"\nMissing in Xray (would add {min(sample, len(to_add))} of {len(to_add)}):")
+        for uuid in sorted(to_add)[:sample]:
+            print(f"  + {uuid}  email={desired.get(uuid, '?')}")
+    if to_remove:
+        print(f"\nStale in Xray (would remove {min(sample, len(to_remove))} of {len(to_remove)}):")
+        for uuid in sorted(to_remove)[:sample]:
+            email = email_by_uuid.get(uuid, f"orphan/{uuid[:8]}")
+            print(f"  - {uuid}  email={email}")
+
+
+def cmd_xray_reconcile(args: argparse.Namespace) -> None:  # noqa: ARG001
+    """Run one reconciliation pass and print the result.
+
+    Equivalent to a single tick of the background reconciler loop. Useful
+    after a known operator action (config edit, manual Xray restart) or to
+    verify a fresh deployment.
+    """
+    from backend.xray_reconciler import run_reconciler_once
+
+    settings = get_settings()
+    result = run_reconciler_once(settings)
+    print("Reconciler result:")
+    for key in ("enabled", "live", "desired", "to_add", "to_remove", "added", "removed", "skipped_reason"):
+        print(f"  {key:<16}: {result.get(key)}")
+    if result.get("skipped_reason"):
+        sys.exit(2)
+
+
 def cmd_delete_user(args: argparse.Namespace) -> None:
     with session_scope() as db:
         user = _require_user(db, args.token)
@@ -257,17 +335,54 @@ def cmd_delete_user(args: argparse.Namespace) -> None:
                 sys.exit(1)
 
         db.delete(user)
-        db.commit()
+        # Flush so apply_xray_client_changes sees the deletion in the
+        # build_active_xray_clients query. We commit ONLY after the runtime
+        # apply succeeds, so a logical Xray failure cannot leave the system
+        # in an inconsistent state (user gone from DB, UUID still live in
+        # Xray with no DB row to identify it).
+        db.flush()
 
         try:
             apply_xray_client_changes(db, get_settings())
-        except Exception as exc:  # noqa: BLE001 — defensive; function should not raise
+        except XrayApiUnavailable as exc:
+            # Transient: the on-disk snapshot is already written and the
+            # reconciler will reap the UUID on its next pass. Commit the
+            # DB delete and exit 0 — graceful degradation.
+            db.commit()
             print(
-                f"Warning: user deleted, but Xray reload failed: {exc}. "
-                "Reload Xray manually to revoke active sessions.",
+                f"Note: user '{username}' deleted in DB. Xray API unavailable ({exc}); "
+                "the reconciler will revoke active sessions on its next pass.",
                 file=sys.stderr,
             )
+            print(
+                f"User '{username}' (token {token}) deleted. "
+                f"Removed {device_count} devices."
+            )
+            return
+        except XrayApiError as exc:
+            # Logical failure (bad inbound tag, malformed message, etc.).
+            # Roll back so DB and Xray runtime stay consistent. The user
+            # is preserved; the operator can investigate and retry.
+            db.rollback()
+            print(
+                f"ERROR: Xray runtime update failed: {exc}\n"
+                f"User '{username}' was NOT deleted — DB transaction rolled back.\n"
+                f"Investigate Xray (check `python -m backend.cli xray-state`) and retry.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            # Unknown error path. Treat as fatal: roll back and exit non-zero
+            # so a buggy code path cannot silently delete a user.
+            db.rollback()
+            print(
+                f"ERROR: Xray apply raised unexpectedly: {exc}\n"
+                f"User '{username}' was NOT deleted — DB transaction rolled back.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
+        db.commit()
         print(
             f"User '{username}' (token {token}) deleted. "
             f"Removed {device_count} devices."
@@ -332,6 +447,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token", required=True, help="User's public token")
     p.add_argument("--yes", action="store_true", help="Skip the interactive confirmation prompt")
 
+    # xray-state
+    sub.add_parser(
+        "xray-state",
+        help="Show DB vs Xray HandlerService comparison and drift",
+    )
+
+    # xray-reconcile
+    sub.add_parser(
+        "xray-reconcile",
+        help="Run reconciler once and apply any drift",
+    )
+
     return parser
 
 
@@ -360,6 +487,8 @@ def main() -> None:
         "set-expiry": cmd_set_expiry,
         "reset-token": cmd_reset_token,
         "delete-user": cmd_delete_user,
+        "xray-state": cmd_xray_state,
+        "xray-reconcile": cmd_xray_reconcile,
     }
     handlers[args.command](args)
 
