@@ -54,8 +54,10 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from backend.xray_clients import _build_uuid_to_email_map, build_desired_runtime_state
+from backend.xray_clients import build_desired_runtime_state
 from backend.xray_handler_api import (
+    AddStatus,
+    RemoveStatus,
     XrayApiError,
     XrayApiUnavailable,
     add_user,
@@ -90,9 +92,19 @@ def run_reconciler_once(settings: "Settings") -> dict:
           "to_add": int,
           "to_remove": int,
           "added": int,
+          "already_present_same_uuid": int,
+          "replaced_different_uuid": int,
           "removed": int,
+          "skipped_already_absent": int,
+          "skipped_no_email": int,
           "skipped_reason": str | None,
         }
+
+    ``added`` / ``removed`` count REAL state changes only; the other
+    counters track idempotent no-ops and decoder skips. The split is what
+    catches the production drift scenario: prior versions reported
+    ``removed: 3`` while every call returned "not found" and Xray state
+    never changed.
 
     Never raises — exceptions are caught and recorded in ``skipped_reason``.
     """
@@ -103,7 +115,11 @@ def run_reconciler_once(settings: "Settings") -> dict:
         "to_add": 0,
         "to_remove": 0,
         "added": 0,
+        "already_present_same_uuid": 0,
+        "replaced_different_uuid": 0,
         "removed": 0,
+        "skipped_already_absent": 0,
+        "skipped_no_email": 0,
         "skipped_reason": None,
     }
 
@@ -124,13 +140,11 @@ def run_reconciler_once(settings: "Settings") -> dict:
     try:
         with session_scope() as db:
             desired = build_desired_runtime_state(db)
-            email_by_uuid = _build_uuid_to_email_map(db)
     except Exception as exc:  # noqa: BLE001
         logger.exception("xray_reconciler: DB read failed: %s", exc)
         result["skipped_reason"] = f"db error: {exc}"
         return result
 
-    email_by_uuid.update(desired)
     result["desired"] = len(desired)
 
     try:
@@ -149,8 +163,9 @@ def run_reconciler_once(settings: "Settings") -> dict:
 
     result["live"] = len(live)
     desired_ids = set(desired.keys())
-    to_add = desired_ids - live
-    to_remove = live - desired_ids
+    live_ids = set(live.keys())
+    to_add = desired_ids - live_ids
+    to_remove = live_ids - desired_ids
     result["to_add"] = len(to_add)
     result["to_remove"] = len(to_remove)
 
@@ -171,10 +186,20 @@ def run_reconciler_once(settings: "Settings") -> dict:
     )
 
     for uuid in sorted(to_remove):
-        email = email_by_uuid.get(uuid) or f"orphan/{uuid[:8]}"
+        email = live.get(uuid, "")
+        if not email:
+            logger.error(
+                "xray_reconciler: cannot remove uuid=%s — Xray returned no "
+                "email for this entry (decoder glitch?); skipping. Manual "
+                "cleanup required (try xray-purge-orphans).",
+                uuid,
+            )
+            result["skipped_no_email"] += 1
+            continue
         try:
-            remove_user(addr=addr, inbound_tag=tag, email=email, timeout=timeout)
-            result["removed"] += 1
+            status = remove_user(
+                addr=addr, inbound_tag=tag, email=email, timeout=timeout,
+            )
         except XrayApiUnavailable as exc:
             logger.info(
                 "xray_reconciler: remove_user(email=%s) — API became unavailable mid-pass: %s",
@@ -187,18 +212,22 @@ def run_reconciler_once(settings: "Settings") -> dict:
                 "xray_reconciler: remove_user(email=%s) failed: %s",
                 email, exc,
             )
+            continue
+        if status is RemoveStatus.REMOVED:
+            result["removed"] += 1
+        elif status is RemoveStatus.NOT_PRESENT:
+            result["skipped_already_absent"] += 1
 
     for uuid in sorted(to_add):
         email = desired[uuid]
         try:
-            add_user(
+            status = add_user(
                 addr=addr,
                 inbound_tag=tag,
                 device_uuid=uuid,
                 email=email,
                 timeout=timeout,
             )
-            result["added"] += 1
         except XrayApiUnavailable as exc:
             logger.info(
                 "xray_reconciler: add_user(email=%s) — API became unavailable mid-pass: %s",
@@ -211,10 +240,21 @@ def run_reconciler_once(settings: "Settings") -> dict:
                 "xray_reconciler: add_user(email=%s) failed: %s",
                 email, exc,
             )
+            continue
+        if status is AddStatus.ADDED:
+            result["added"] += 1
+        elif status is AddStatus.ALREADY_PRESENT_SAME_UUID:
+            result["already_present_same_uuid"] += 1
+        elif status is AddStatus.REPLACED_DIFFERENT_UUID:
+            result["replaced_different_uuid"] += 1
 
     logger.info(
-        "xray_reconciler: drift resolved: added=%d removed=%d (errors silently logged above)",
-        result["added"], result["removed"],
+        "xray_reconciler: drift resolved: added=%d replaced=%d "
+        "already_present=%d removed=%d skipped_already_absent=%d "
+        "skipped_no_email=%d",
+        result["added"], result["replaced_different_uuid"],
+        result["already_present_same_uuid"], result["removed"],
+        result["skipped_already_absent"], result["skipped_no_email"],
     )
     return result
 

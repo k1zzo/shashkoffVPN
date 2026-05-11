@@ -51,6 +51,8 @@ from sqlalchemy.orm import Session
 
 from backend.models import Device, User
 from backend.xray_handler_api import (
+    AddStatus,
+    RemoveStatus,
     XrayApiUnavailable,
     add_user,
     list_users,
@@ -259,22 +261,24 @@ def apply_xray_client_changes(db: Session, settings: "Settings") -> None:
 
 def _apply_via_handler_api_end_to_end(
     *,
-    db: Session,
+    db: Session,  # noqa: ARG001 — kept for caller symmetry, see comment below
     settings: "Settings",
     desired: dict[str, str],
 ) -> None:
     """Compute diff against Xray live state and apply add/remove operations.
 
-    Email resolution for removes: we use the email we would have used at
-    add time (looked up from the DB by device_uuid). For truly orphaned
-    UUIDs (present in Xray, no DB row), we fall back to a synthetic email
-    of "orphan/<uuid[:8]>" — which is harmless because Xray identifies the
-    user by email at removal time, and an orphan with no matching email
-    will be skipped via remove_user's idempotent "not found" handler.
+    Email resolution for removes now comes ENTIRELY from the live dict
+    returned by ``list_users``: ``live[uuid]`` is the email Xray itself
+    has registered for that UUID, which is the only email that
+    RemoveUserOperation will accept. We no longer build a DB-derived
+    ``orphan/<short>`` placeholder — that fallback caused silent drift
+    in production because Xray rejected the synthetic emails with
+    "not found" and the reconciler swallowed those rejections as success.
 
-    The reconciler does a more thorough cleanup pass with full email
-    resolution via the live UUID→email map; this function only needs to
-    handle the simple "we know what we just changed" case.
+    If a UUID in ``live`` has no email (decoder glitch, malformed entry),
+    we log an ERROR and skip it — never invent. The ``db`` parameter is
+    retained for symmetry with the legacy fallback path and forward
+    compatibility but is no longer used here.
     """
     addr = settings.xray_api_addr or ""
     tag = getattr(settings, "xray_vless_inbound_tag", "vless-reality-in")
@@ -291,8 +295,9 @@ def _apply_via_handler_api_end_to_end(
         return
 
     desired_ids = set(desired.keys())
-    to_add = desired_ids - live
-    to_remove = live - desired_ids
+    live_ids = set(live.keys())
+    to_add = desired_ids - live_ids
+    to_remove = live_ids - desired_ids
 
     if not to_add and not to_remove:
         logger.info(
@@ -301,45 +306,49 @@ def _apply_via_handler_api_end_to_end(
         )
         return
 
-    # Build a reverse map of {uuid: email} for ALL devices in the DB (including
-    # inactive ones whose UUID may still be present in Xray) so we can resolve
-    # the email for a remove operation when the UUID is not in `desired`.
-    email_by_uuid = _build_uuid_to_email_map(db)
-    email_by_uuid.update(desired)  # current desired takes precedence
-
+    removed_count = 0
+    skipped_already_absent = 0
     for uuid in sorted(to_remove):
-        email = email_by_uuid.get(uuid) or f"orphan/{uuid[:8]}"
-        remove_user(addr=addr, inbound_tag=tag, email=email, timeout=timeout)
+        email = live.get(uuid, "")
+        if not email:
+            logger.error(
+                "xray_clients: cannot remove uuid=%s — Xray returned no email "
+                "for this entry (decoder glitch?); skipping. Manual cleanup "
+                "required.",
+                uuid,
+            )
+            continue
+        status = remove_user(
+            addr=addr, inbound_tag=tag, email=email, timeout=timeout,
+        )
+        if status is RemoveStatus.REMOVED:
+            removed_count += 1
+        elif status is RemoveStatus.NOT_PRESENT:
+            skipped_already_absent += 1
 
+    added_count = 0
+    already_present_same_uuid = 0
+    replaced_different_uuid = 0
     for uuid in sorted(to_add):
-        add_user(
+        status = add_user(
             addr=addr,
             inbound_tag=tag,
             device_uuid=uuid,
             email=desired[uuid],
             timeout=timeout,
         )
+        if status is AddStatus.ADDED:
+            added_count += 1
+        elif status is AddStatus.ALREADY_PRESENT_SAME_UUID:
+            already_present_same_uuid += 1
+        elif status is AddStatus.REPLACED_DIFFERENT_UUID:
+            replaced_different_uuid += 1
 
     logger.info(
-        "xray_clients: HandlerService applied +%d -%d (live before=%d)",
-        len(to_add), len(to_remove), len(live),
+        "xray_clients: HandlerService applied: added=%d removed=%d "
+        "replaced=%d already_present=%d skipped_already_absent=%d "
+        "(live before=%d, desired=%d)",
+        added_count, removed_count, replaced_different_uuid,
+        already_present_same_uuid, skipped_already_absent,
+        len(live), len(desired_ids),
     )
-
-
-def _build_uuid_to_email_map(db: Session) -> dict[str, str]:
-    """Return {device_uuid: email} for every device row that has a UUID.
-
-    Includes inactive and expired devices because their UUIDs may still
-    be present in Xray's live set — we need their email to remove them.
-    """
-    rows = db.execute(
-        select(Device, User)
-        .join(User, Device.user_id == User.id)
-        .where(Device.device_uuid.isnot(None))
-    ).all()
-    out: dict[str, str] = {}
-    for device, user in rows:
-        if device.device_uuid is None:
-            continue
-        out[device.device_uuid] = _client_email(user.username, device.device_id)
-    return out

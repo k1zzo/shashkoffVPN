@@ -83,22 +83,53 @@ Design choices
 Examples
 --------
 >>> add_user(
+...     addr="127.0.0.1:10085",
 ...     inbound_tag="vless-reality-in",
 ...     device_uuid="aaaa-bbbb-cccc-dddd-eeee",
 ...     email="alice/iphone-15",
 ... )
->>> remove_user("vless-reality-in", "alice/iphone-15")
->>> live = list_users("vless-reality-in")
->>> isinstance(live, set)
+<AddStatus.ADDED: 'added'>
+>>> remove_user("127.0.0.1:10085", "vless-reality-in", "alice/iphone-15")
+<RemoveStatus.REMOVED: 'removed'>
+>>> live = list_users("127.0.0.1:10085", "vless-reality-in")
+>>> isinstance(live, dict)
 True
 """
 
 from __future__ import annotations
 
+import enum
 import logging
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
+
+
+# ── Result status enums ──────────────────────────────────────────────────────
+#
+# Returned by add_user / remove_user so callers (reconciler, CLI) can
+# distinguish a real state change from an idempotent no-op. The production
+# bug that motivated these enums: reconciler reported "removed: 3" while
+# none of the gRPC calls actually changed Xray state — every remove
+# returned "not found" and was swallowed. With these enums, callers count
+# state changes (REMOVED / ADDED) separately from idempotent successes
+# (NOT_PRESENT / ALREADY_PRESENT_SAME_UUID) and can surface drift that
+# silently fails to converge.
+
+
+class RemoveStatus(enum.Enum):
+    """Outcome of a remove_user call."""
+
+    REMOVED = "removed"            # gRPC call actually performed a state change
+    NOT_PRESENT = "not_present"    # Xray reported "not found" — idempotent no-op
+
+
+class AddStatus(enum.Enum):
+    """Outcome of an add_user call."""
+
+    ADDED = "added"                                  # call actually added the user
+    ALREADY_PRESENT_SAME_UUID = "already_present_same_uuid"  # benign idempotent reapply
+    REPLACED_DIFFERENT_UUID = "replaced_different_uuid"      # collision resolved by remove+retry
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -319,8 +350,21 @@ def _decode_typed_message(data: bytes) -> tuple[str, bytes]:
     return type_url, value
 
 
-def _decode_user_account_id(user_data: bytes) -> str:
-    """Read account.TypedMessage(field 3) out of a User and return Account.id."""
+def _decode_user_uuid_and_email(user_data: bytes) -> tuple[str, str]:
+    """Pull (uuid, email) out of one common.protocol.User message.
+
+    User { uint32 level=1; string email=2; TypedMessage account=3 }
+
+    The email is field 2 of User and is the label Xray uses for stats and
+    for RemoveUserOperation.email — the ONLY identifier accepted by the
+    remove RPC. Earlier versions of this module read field 3 (the
+    TypedMessage(Account.id)) and discarded field 2; that drop is what
+    forced the reconciler to invent synthetic ``orphan/<short>`` emails
+    which Xray promptly rejected with "not found". Both fields are kept
+    now so callers can address the live entry by its real email.
+    """
+    uuid_value = ""
+    email_value = ""
     pos = 0
     n = len(user_data)
     while pos < n:
@@ -330,21 +374,43 @@ def _decode_user_account_id(user_data: bytes) -> str:
             break
         field_num = tag >> 3
         wire_type = tag & 0x7
-        if field_num == 3 and wire_type == 2:
+        if field_num == 2 and wire_type == 2:
+            length, pos = _read_varint(user_data, pos)
+            email_value = user_data[pos : pos + length].decode(
+                "utf-8", errors="replace"
+            )
+            pos += length
+        elif field_num == 3 and wire_type == 2:
             length, pos = _read_varint(user_data, pos)
             typed_bytes = user_data[pos : pos + length]
             pos += length
             type_url, value = _decode_typed_message(typed_bytes)
             if type_url == _TYPE_VLESS_ACCOUNT:
-                return _decode_vless_account_id(value)
+                uuid_value = _decode_vless_account_id(value)
         else:
             pos = _skip_field(user_data, pos, wire_type)
-    return ""
+    return uuid_value, email_value
 
 
-def _decode_vless_inbound_config_uuids(config_data: bytes) -> list[str]:
-    """Extract Account.id values from vless.inbound.Config.clients (repeated User, field 1)."""
-    uuids: list[str] = []
+def _decode_user_account_id(user_data: bytes) -> str:
+    """Backward-compat shim: return just the Account.id of a User message.
+
+    Retained for callers (and tests) that only need the UUID.
+    """
+    return _decode_user_uuid_and_email(user_data)[0]
+
+
+def _decode_vless_inbound_config_users(
+    config_data: bytes,
+) -> list[tuple[str, str]]:
+    """Extract (uuid, email) pairs from vless.inbound.Config.clients.
+
+    The clients field is ``repeated User clients = 1`` inside the vless
+    inbound config TypedMessage. Each User contributes one pair; entries
+    with a missing UUID (decoder failure) are dropped because there is
+    nothing useful a caller can do with them.
+    """
+    users: list[tuple[str, str]] = []
     pos = 0
     n = len(config_data)
     while pos < n:
@@ -358,18 +424,20 @@ def _decode_vless_inbound_config_uuids(config_data: bytes) -> list[str]:
             length, pos = _read_varint(config_data, pos)
             user_bytes = config_data[pos : pos + length]
             pos += length
-            uuid = _decode_user_account_id(user_bytes)
-            if uuid:
-                uuids.append(uuid)
+            uuid_value, email_value = _decode_user_uuid_and_email(user_bytes)
+            if uuid_value:
+                users.append((uuid_value, email_value))
         else:
             pos = _skip_field(config_data, pos, wire_type)
-    return uuids
+    return users
 
 
-def _decode_inbound_handler_config(data: bytes) -> tuple[str, list[str]]:
-    """Return (tag, [uuids]) for one InboundHandlerConfig entry."""
+def _decode_inbound_handler_config(
+    data: bytes,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Return ``(tag, [(uuid, email), ...])`` for one InboundHandlerConfig."""
     tag_value = ""
-    uuids: list[str] = []
+    users: list[tuple[str, str]] = []
     pos = 0
     n = len(data)
     while pos < n:
@@ -390,15 +458,23 @@ def _decode_inbound_handler_config(data: bytes) -> tuple[str, list[str]]:
             _proxy_type, proxy_value = _decode_typed_message(typed_bytes)
             # The proxy_settings TypedMessage value is the wire-encoded
             # vless.inbound.Config — decode its clients directly.
-            uuids = _decode_vless_inbound_config_uuids(proxy_value)
+            users = _decode_vless_inbound_config_users(proxy_value)
         else:
             pos = _skip_field(data, pos, wire_type)
-    return tag_value, uuids
+    return tag_value, users
 
 
-def decode_list_inbounds_response(data: bytes, target_tag: str) -> set[str]:
-    """Return the set of Account.id values registered under ``target_tag``."""
-    out: set[str] = set()
+def decode_list_inbounds_response(
+    data: bytes, target_tag: str
+) -> dict[str, str]:
+    """Return ``{uuid: email}`` for every user registered under ``target_tag``.
+
+    The dict shape preserves the email field that Xray's RemoveUserOperation
+    requires. If two users in different inbounds happen to share a UUID,
+    the entry for ``target_tag`` wins because only that inbound's users
+    are merged in.
+    """
+    out: dict[str, str] = {}
     pos = 0
     n = len(data)
     while pos < n:
@@ -412,9 +488,10 @@ def decode_list_inbounds_response(data: bytes, target_tag: str) -> set[str]:
             length, pos = _read_varint(data, pos)
             inbound_bytes = data[pos : pos + length]
             pos += length
-            tag_value, uuids = _decode_inbound_handler_config(inbound_bytes)
+            tag_value, users = _decode_inbound_handler_config(inbound_bytes)
             if tag_value == target_tag:
-                out.update(uuids)
+                for uuid_value, email_value in users:
+                    out[uuid_value] = email_value
         else:
             pos = _skip_field(data, pos, wire_type)
     return out
@@ -499,24 +576,36 @@ def add_user(
     *,
     flow: str = "xtls-rprx-vision",
     timeout: float = 5.0,
-) -> None:
+    _attempt: int = 0,
+) -> AddStatus:
     """Add a VLESS client to a running Xray inbound.
 
-    Idempotent: when Xray reports "already exists", this is logged at WARNING
-    and treated as success — common during reconciliation when the live set
-    already matches.
+    On Xray reporting ``already exists`` we look up the live UUID for that
+    email via ``list_users`` and:
+
+      * If the live UUID matches ``device_uuid``: this is a benign
+        idempotent reapply (the entry we wanted is already present under
+        the same UUID). Returns ``AddStatus.ALREADY_PRESENT_SAME_UUID``.
+      * If the live UUID differs: this is a real collision (the prod bug
+        we fixed — orphan entry under email X with UUID A blocking a
+        legitimate new device with UUID B). We ``remove_user(email)`` then
+        retry ``add_user`` once. On success returns
+        ``AddStatus.REPLACED_DIFFERENT_UUID``; if the retry still fails
+        with ``already exists`` we raise ``XrayApiError`` because the
+        collision could not be resolved.
 
     Args:
       addr: gRPC endpoint, e.g. ``172.18.0.1:10085``.
       inbound_tag: the inbound's tag, e.g. ``vless-reality-in``.
       device_uuid: VLESS user ID (UUID4 string).
-      email: label used by Xray for stats and logs.
+      email: label used by Xray for stats and as the RemoveUserOperation key.
       flow: VLESS flow string. Default matches our inbound.
       timeout: seconds.
 
     Raises:
       XrayApiUnavailable: API endpoint unreachable.
-      XrayApiError: any other failure (bad tag, malformed message, etc.).
+      XrayApiError: any other failure (bad tag, malformed message,
+        unresolvable email collision).
     """
     if not addr:
         raise XrayApiUnavailable("XRAY_API_ADDR is not configured")
@@ -535,13 +624,92 @@ def add_user(
         raise
     except XrayApiError as exc:
         if _matches_any(str(exc), _ALREADY_EXISTS_MARKERS):
-            logger.warning(
-                "xray_handler: add_user(email=%s) — Xray reports already exists; treating as success",
-                email,
+            return _resolve_add_user_collision(
+                addr=addr,
+                inbound_tag=inbound_tag,
+                device_uuid=device_uuid,
+                email=email,
+                flow=flow,
+                timeout=timeout,
+                attempt=_attempt,
             )
-            return
         raise
     logger.info("xray_handler: add_user email=%s uuid=%.8s", email, device_uuid)
+    return AddStatus.ADDED
+
+
+def _resolve_add_user_collision(
+    *,
+    addr: str,
+    inbound_tag: str,
+    device_uuid: str,
+    email: str,
+    flow: str,
+    timeout: float,
+    attempt: int,
+) -> AddStatus:
+    """Disambiguate an "already exists" error from Xray's HandlerService.
+
+    Looks up the live (uuid, email) state and decides whether the existing
+    entry is the one we wanted (idempotent) or a different UUID that must
+    be replaced. Recursion is bounded by ``attempt`` — a second failure
+    on the retry path raises rather than looping.
+    """
+    if attempt >= 1:
+        raise XrayApiError(
+            f"xray_handler: add_user(email={email}) — email collision could not "
+            f"be resolved: Xray still reports 'already exists' after "
+            f"remove_user+retry. Manual intervention required."
+        )
+
+    live = list_users(addr=addr, inbound_tag=inbound_tag, timeout=timeout)
+    matched_uuid = _find_live_uuid_for_email(live, email)
+
+    if matched_uuid == device_uuid:
+        logger.info(
+            "xray_handler: add_user(email=%s) — already present with same uuid; "
+            "treating as success",
+            email,
+        )
+        return AddStatus.ALREADY_PRESENT_SAME_UUID
+
+    if not matched_uuid:
+        # Xray said "already exists" but we cannot find a matching email
+        # in the live set. This is contradictory — fail loudly instead of
+        # swallowing it. The production bug was caused by silently
+        # treating ambiguous results as success.
+        raise XrayApiError(
+            f"xray_handler: add_user(email={email}) — Xray reported 'already "
+            f"exists' but no matching email is present in the live set "
+            f"(live entries: {len(live)}). Refusing to swallow."
+        )
+
+    logger.warning(
+        "xray_handler: add_user(email=%s) — email collision detected: "
+        "live uuid=%.8s differs from requested %.8s. Replacing.",
+        email, matched_uuid, device_uuid,
+    )
+    remove_user(addr=addr, inbound_tag=inbound_tag, email=email, timeout=timeout)
+    # Retry the add — if THIS fails with "already exists" again, the
+    # recursion guard raises rather than looping forever.
+    add_user(
+        addr=addr,
+        inbound_tag=inbound_tag,
+        device_uuid=device_uuid,
+        email=email,
+        flow=flow,
+        timeout=timeout,
+        _attempt=attempt + 1,
+    )
+    return AddStatus.REPLACED_DIFFERENT_UUID
+
+
+def _find_live_uuid_for_email(live: dict[str, str], email: str) -> str:
+    """Reverse lookup: return the UUID whose live email equals ``email`` or ""."""
+    for uuid_value, live_email in live.items():
+        if live_email == email:
+            return uuid_value
+    return ""
 
 
 def remove_user(
@@ -550,11 +718,17 @@ def remove_user(
     email: str,
     *,
     timeout: float = 5.0,
-) -> None:
+) -> RemoveStatus:
     """Remove a VLESS client from a running Xray inbound.
 
-    Idempotent: when Xray reports "not found", this is logged at INFO and
-    treated as success — the desired end state is already achieved.
+    Returns:
+      RemoveStatus.REMOVED      — the call actually mutated Xray state.
+      RemoveStatus.NOT_PRESENT  — Xray reported "not found"; nothing changed.
+
+    Distinguishing the two is what lets the reconciler report honest
+    "real changes vs swallowed no-ops" counts. The production bug was a
+    reconciler that printed ``removed: 3`` while every call returned
+    "not found" — silent drift forever.
 
     Raises:
       XrayApiUnavailable: API endpoint unreachable.
@@ -576,12 +750,14 @@ def remove_user(
     except XrayApiError as exc:
         if _matches_any(str(exc), _NOT_FOUND_MARKERS):
             logger.info(
-                "xray_handler: remove_user(email=%s) — Xray reports not found; treating as success",
+                "xray_handler: remove_user(email=%s) — Xray reports not found; "
+                "no state change",
                 email,
             )
-            return
+            return RemoveStatus.NOT_PRESENT
         raise
     logger.info("xray_handler: remove_user email=%s", email)
+    return RemoveStatus.REMOVED
 
 
 def list_users(
@@ -589,11 +765,14 @@ def list_users(
     inbound_tag: str,
     *,
     timeout: float = 5.0,
-) -> set[str]:
-    """Return the set of device UUIDs currently registered under ``inbound_tag``.
+) -> dict[str, str]:
+    """Return ``{device_uuid: email}`` for every user registered under ``inbound_tag``.
 
-    Used by the reconciler to detect drift between DB-derived state and the
-    live Xray client list.
+    Email is the only identifier Xray accepts for RemoveUserOperation, so
+    the reconciler and ``apply_xray_client_changes`` need this map to
+    address live entries. Earlier signatures returned a bare ``set[str]``
+    of UUIDs which forced callers to invent synthetic ``orphan/<short>``
+    emails — emails Xray promptly rejected as "not found".
 
     Raises:
       XrayApiUnavailable: API endpoint unreachable.

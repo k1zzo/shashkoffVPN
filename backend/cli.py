@@ -12,9 +12,10 @@ Commands:
     extend-user      Extend expiry by N days from today (or from current expiry)
     set-expiry       Set exact expiry datetime (ISO 8601) or clear it
     reset-token      Replace a user's public_token
-    delete-user      Permanently delete a user and all their devices
-    xray-state       Show DB vs Xray HandlerService comparison and drift
-    xray-reconcile   Run the reconciler once and apply any drift
+    delete-user        Permanently delete a user and all their devices
+    xray-state         Show DB vs Xray HandlerService comparison and drift
+    xray-reconcile     Run the reconciler once and apply any drift
+    xray-purge-orphans Remove live Xray entries that have no DB row
 """
 
 from __future__ import annotations
@@ -32,8 +33,14 @@ from backend.db import init_db, session_scope
 from backend.models import User
 from backend.queries import count_active_devices, is_user_accessible
 from backend.reserved import is_token_reserved
-from backend.xray_clients import apply_xray_client_changes
-from backend.xray_handler_api import XrayApiError, XrayApiUnavailable
+from backend.xray_clients import apply_xray_client_changes, _client_email
+from backend.xray_handler_api import (
+    RemoveStatus,
+    XrayApiError,
+    XrayApiUnavailable,
+    list_users,
+    remove_user,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -242,11 +249,16 @@ def cmd_reset_token(args: argparse.Namespace) -> None:
 def cmd_xray_state(args: argparse.Namespace) -> None:  # noqa: ARG001
     """Print a side-by-side comparison of DB-desired and Xray-live client sets.
 
-    Useful for debugging drift: shows how many entries each side has, the
-    intersection size, and the first N UUIDs that are missing on either side.
+    Emails for stale-in-Xray entries are pulled directly from the live
+    HandlerService response (which is the only authoritative source for
+    what Xray will accept on RemoveUserOperation). When the live response
+    has no email for a UUID — only on a decoder glitch — the entry is
+    labelled ``email=<unknown>`` literally. Synthetic ``orphan/...``
+    labels are NEVER printed; the previous behaviour misled operators
+    into believing Xray held an entry it never had, which was the
+    starting point of the silent-drift production bug.
     """
-    from backend.xray_clients import _build_uuid_to_email_map, build_desired_runtime_state
-    from backend.xray_handler_api import list_users
+    from backend.xray_clients import build_desired_runtime_state
 
     settings = get_settings()
     addr = settings.xray_api_addr
@@ -260,8 +272,6 @@ def cmd_xray_state(args: argparse.Namespace) -> None:  # noqa: ARG001
 
     with session_scope() as db:
         desired = build_desired_runtime_state(db)
-        email_by_uuid = _build_uuid_to_email_map(db)
-    email_by_uuid.update(desired)
     desired_ids = set(desired.keys())
 
     print(f"DB-desired entries : {len(desired_ids)}")
@@ -279,9 +289,10 @@ def cmd_xray_state(args: argparse.Namespace) -> None:  # noqa: ARG001
         print(f"Xray API error: {exc}")
         sys.exit(2)
 
+    live_ids = set(live.keys())
     print(f"Xray-live entries  : {len(live)}")
-    to_add = desired_ids - live
-    to_remove = live - desired_ids
+    to_add = desired_ids - live_ids
+    to_remove = live_ids - desired_ids
     print(f"Drift              : +{len(to_add)} -{len(to_remove)}")
 
     sample = 10
@@ -292,7 +303,7 @@ def cmd_xray_state(args: argparse.Namespace) -> None:  # noqa: ARG001
     if to_remove:
         print(f"\nStale in Xray (would remove {min(sample, len(to_remove))} of {len(to_remove)}):")
         for uuid in sorted(to_remove)[:sample]:
-            email = email_by_uuid.get(uuid, f"orphan/{uuid[:8]}")
+            email = live.get(uuid) or "<unknown>"
             print(f"  - {uuid}  email={email}")
 
 
@@ -302,19 +313,145 @@ def cmd_xray_reconcile(args: argparse.Namespace) -> None:  # noqa: ARG001
     Equivalent to a single tick of the background reconciler loop. Useful
     after a known operator action (config edit, manual Xray restart) or to
     verify a fresh deployment.
+
+    The ``added`` and ``removed`` counters reflect REAL state changes
+    only. ``skipped_already_absent`` / ``already_present_same_uuid``
+    flag idempotent no-ops that previously showed up as fake successes.
     """
     from backend.xray_reconciler import run_reconciler_once
 
     settings = get_settings()
     result = run_reconciler_once(settings)
     print("Reconciler result:")
-    for key in ("enabled", "live", "desired", "to_add", "to_remove", "added", "removed", "skipped_reason"):
-        print(f"  {key:<16}: {result.get(key)}")
+    keys = (
+        "enabled",
+        "live",
+        "desired",
+        "to_add",
+        "to_remove",
+        "added",
+        "replaced_different_uuid",
+        "already_present_same_uuid",
+        "removed",
+        "skipped_already_absent",
+        "skipped_no_email",
+        "skipped_reason",
+    )
+    for key in keys:
+        print(f"  {key:<28}: {result.get(key)}")
     if result.get("skipped_reason"):
         sys.exit(2)
 
 
+def cmd_xray_purge_orphans(args: argparse.Namespace) -> None:
+    """Remove UUIDs from Xray runtime that have no corresponding DB row.
+
+    Operator-facing cleanup utility for the drifted-state case. The
+    reconciler's normal mode also reaps orphans, but a sufficiently
+    misconfigured deployment (e.g. the production system before this
+    fix) can accumulate live entries that the reconciler cannot remove
+    because it has no email for them. This command queries DB + Xray,
+    diffs them, and calls remove_user(real_email) for everything in
+    Xray that no longer belongs.
+
+    Refuses to run without --yes.
+    """
+    from backend.xray_clients import build_desired_runtime_state
+
+    settings = get_settings()
+    addr = settings.xray_api_addr
+    tag = getattr(settings, "xray_vless_inbound_tag", "vless-reality-in")
+    timeout = float(getattr(settings, "xray_handler_api_timeout", 5))
+    if not addr or not getattr(settings, "xray_use_handler_api", True):
+        print("Xray HandlerService is not configured — nothing to purge.", file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        live = list_users(addr=addr, inbound_tag=tag, timeout=timeout)
+    except XrayApiUnavailable as exc:
+        print(f"Xray API unavailable: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except XrayApiError as exc:
+        print(f"Xray API error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    with session_scope() as db:
+        desired = build_desired_runtime_state(db)
+    desired_ids = set(desired.keys())
+    orphan_uuids = sorted(set(live.keys()) - desired_ids)
+
+    print(f"Xray live entries  : {len(live)}")
+    print(f"DB-desired entries : {len(desired_ids)}")
+    print(f"Orphans to purge   : {len(orphan_uuids)}")
+
+    if not orphan_uuids:
+        print("Nothing to do.")
+        return
+
+    for uuid in orphan_uuids[:20]:
+        email = live.get(uuid) or "<unknown>"
+        print(f"  - {uuid}  email={email}")
+    if len(orphan_uuids) > 20:
+        print(f"  ... and {len(orphan_uuids) - 20} more")
+
+    if not args.yes:
+        try:
+            entered = input("Type 'PURGE' to confirm: ")
+        except EOFError:
+            entered = ""
+        if entered != "PURGE":
+            print("Aborted.", file=sys.stderr)
+            sys.exit(1)
+
+    removed = 0
+    skipped_no_email = 0
+    skipped_already_absent = 0
+    for uuid in orphan_uuids:
+        email = live.get(uuid, "")
+        if not email:
+            print(
+                f"  SKIP {uuid}: Xray returned no email; manual cleanup required.",
+                file=sys.stderr,
+            )
+            skipped_no_email += 1
+            continue
+        try:
+            status = remove_user(
+                addr=addr, inbound_tag=tag, email=email, timeout=timeout,
+            )
+        except XrayApiUnavailable as exc:
+            print(
+                f"Xray API became unavailable mid-purge after {removed} removals: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        except XrayApiError as exc:
+            print(f"  ERROR {uuid} email={email}: {exc}", file=sys.stderr)
+            continue
+        if status is RemoveStatus.REMOVED:
+            removed += 1
+        elif status is RemoveStatus.NOT_PRESENT:
+            skipped_already_absent += 1
+
+    # Verify the cleanup by re-fetching the live set.
+    try:
+        live_after = list_users(addr=addr, inbound_tag=tag, timeout=timeout)
+        after_count = len(live_after)
+    except (XrayApiUnavailable, XrayApiError) as exc:
+        after_count = -1
+        print(f"Note: post-purge list_users failed: {exc}", file=sys.stderr)
+
+    print(
+        f"\nPurge complete: removed={removed} "
+        f"skipped_already_absent={skipped_already_absent} "
+        f"skipped_no_email={skipped_no_email}"
+    )
+    print(f"Live entries before: {len(live)}, after: {after_count}")
+
+
 def cmd_delete_user(args: argparse.Namespace) -> None:
+    settings = get_settings()
+
     with session_scope() as db:
         user = _require_user(db, args.token)
         active = count_active_devices(db, user.id)
@@ -334,20 +471,53 @@ def cmd_delete_user(args: argparse.Namespace) -> None:
                 print("Aborted: confirmation did not match the username.", file=sys.stderr)
                 sys.exit(1)
 
+        # Step 1 — capture the (uuid, email) pairs we will need to remove
+        # from Xray's live state BEFORE the DB rows disappear. After
+        # ``db.delete(user)`` and ``db.flush()`` the related device rows
+        # cascade away, taking with them the data needed to construct
+        # each email. Doing this work in-memory avoids the production bug
+        # where the apply path fell back to synthetic ``orphan/<short>``
+        # emails which Xray rejected as "not found".
+        to_remove_emails: list[str] = []
+        for device in user.devices:
+            if not device.is_active or not device.device_uuid:
+                continue
+            to_remove_emails.append(_client_email(user.username, device.device_id))
+
         db.delete(user)
-        # Flush so apply_xray_client_changes sees the deletion in the
-        # build_active_xray_clients query. We commit ONLY after the runtime
-        # apply succeeds, so a logical Xray failure cannot leave the system
-        # in an inconsistent state (user gone from DB, UUID still live in
-        # Xray with no DB row to identify it).
         db.flush()
 
+        # Step 2 — apply Xray removals BEFORE commit. If any fail with
+        # XrayApiError we roll back so the DB and Xray runtime never
+        # diverge. The explicit per-email loop runs only when the
+        # HandlerService path is configured; the snapshot/legacy path
+        # is handled by apply_xray_client_changes below.
+        handler_enabled = bool(
+            getattr(settings, "xray_use_handler_api", True)
+            and settings.xray_api_addr
+        )
+        addr = settings.xray_api_addr or ""
+        tag = getattr(settings, "xray_vless_inbound_tag", "vless-reality-in")
+        timeout = float(getattr(settings, "xray_handler_api_timeout", 5))
+
         try:
-            apply_xray_client_changes(db, get_settings())
+            if handler_enabled:
+                for email in to_remove_emails:
+                    remove_user(
+                        addr=addr, inbound_tag=tag, email=email, timeout=timeout,
+                    )
+            # Always call the standard apply: it writes the on-disk
+            # snapshot and, for the legacy path, triggers the reload
+            # command. For the HandlerService path it is a no-op diff
+            # because the explicit removes above already converged
+            # runtime state — but we still want the snapshot file
+            # rewritten.
+            apply_xray_client_changes(db, settings)
         except XrayApiUnavailable as exc:
-            # Transient: the on-disk snapshot is already written and the
-            # reconciler will reap the UUID on its next pass. Commit the
-            # DB delete and exit 0 — graceful degradation.
+            # Transient: the on-disk snapshot is already written (or
+            # will be by the next reconciler pass) and the reconciler
+            # will reap any still-live UUIDs on its next pass. Commit
+            # the DB delete and exit 0 — graceful degradation.
             db.commit()
             print(
                 f"Note: user '{username}' deleted in DB. Xray API unavailable ({exc}); "
@@ -459,6 +629,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run reconciler once and apply any drift",
     )
 
+    # xray-purge-orphans
+    p = sub.add_parser(
+        "xray-purge-orphans",
+        help="Remove Xray runtime entries that have no DB row",
+    )
+    p.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive PURGE confirmation prompt",
+    )
+
     return parser
 
 
@@ -489,6 +670,7 @@ def main() -> None:
         "delete-user": cmd_delete_user,
         "xray-state": cmd_xray_state,
         "xray-reconcile": cmd_xray_reconcile,
+        "xray-purge-orphans": cmd_xray_purge_orphans,
     }
     handlers[args.command](args)
 

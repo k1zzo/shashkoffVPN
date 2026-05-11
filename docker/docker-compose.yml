@@ -14,3 +14,16 @@ services:
       # App writes xray-clients.json here; the host-side watcher reads it.
       - ../data:/app/data
     restart: unless-stopped
+    networks:
+      - shashkoff
+
+networks:
+  shashkoff:
+    name: shashkoff
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-shashkoff
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+          gateway: 172.18.0.1
