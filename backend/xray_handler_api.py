@@ -11,8 +11,9 @@ Why this exists
 for ~1 second. With dozens of concurrent users that means a visible
 hiccup for everyone every time any device is added or removed. The
 HandlerService API lets us mutate Xray's in-memory client list with two
-RPCs (AlterInbound + AddUserOperation / RemoveUserOperation) and the
-running connections are left intact.
+RPCs (AlterInbound + AddUserOperation / RemoveUserOperation) and query
+the live set with a third (GetInboundUsers) — leaving running
+connections intact.
 
 Wire-format source (IMPORTANT for future maintainers)
 -----------------------------------------------------
@@ -22,12 +23,19 @@ in the deployment pipeline. The wire format was derived against:
 
     Xray-core v24.11.30  (https://github.com/XTLS/Xray-core/tree/v24.11.30)
 
+and verified against the production-deployed:
+
+    Xray-core v26.3.27   (installed via the XTLS install-script)
+
+For the methods this module actually uses — AlterInbound,
+AddUserOperation, RemoveUserOperation, GetInboundUsers — the proto
+field numbers and type-URL strings are unchanged across 24.x → 26.x.
+
 Specifically these four proto files were mirrored:
 
     app/proxyman/command/command.proto      (HandlerService, AlterInbound,
                                              AddUserOperation, RemoveUserOperation,
-                                             ListInboundsRequest/Response,
-                                             InboundHandlerConfig)
+                                             GetInboundUserRequest/Response)
         https://github.com/XTLS/Xray-core/blob/v24.11.30/app/proxyman/command/command.proto
 
     common/protocol/user.proto              (User { level, email, account })
@@ -42,9 +50,30 @@ Specifically these four proto files were mirrored:
 The field numbers, wire types, type-URL strings and the per-message
 encoder/decoder pairs here mirror those files exactly. Regression
 coverage that locks the wire bytes lives in
-``tests/test_xray_handler_api.py::TestWireFormatGuards``.
+``tests/test_xray_handler_api.py::TestWireFormatGuards`` and
+``::TestGetInboundUsersWireFormat``.
 
-If Xray is ever bumped past 24.x with a breaking protobuf change
+Method-choice lessons learned
+-----------------------------
+HandlerService exposes two superficially similar lookup methods:
+
+* ``ListInbounds`` returns inbound *configuration* (port, transport,
+  Reality keys, fallbacks) and the clients that were written to
+  config.json at start. It does NOT include users added at runtime via
+  AlterInbound. On a server that boots with an empty inbound and adds
+  every client via the API at runtime, ``ListInbounds`` will report
+  zero users no matter how many are actually present. This was the
+  production bug that motivated the switch.
+* ``GetInboundUsers`` returns the *runtime* user list for a given
+  inbound tag — the live set, including everything added via
+  AlterInbound since boot. This is the only correct method for our
+  reconciliation, orphan-cleanup, and drift-detection use cases.
+
+The two methods look interchangeable by name; they are not. Future
+maintainers must use GetInboundUsers for any "what users does Xray
+actually know about right now" question.
+
+If Xray is ever bumped past 26.x with a breaking protobuf change
 (renamed fields, renumbered fields, removed services, renamed type
 URLs), this module MUST be re-validated against the new proto sources.
 Use ``deploy/generate_xray_protos.sh`` to regenerate stubs from the
@@ -158,7 +187,7 @@ class XrayApiUnavailable(XrayApiError):
 # ── gRPC method paths ────────────────────────────────────────────────────────
 
 _GRPC_ALTER_INBOUND = "/xray.app.proxyman.command.HandlerService/AlterInbound"
-_GRPC_LIST_INBOUNDS = "/xray.app.proxyman.command.HandlerService/ListInbounds"
+_GRPC_GET_INBOUND_USERS = "/xray.app.proxyman.command.HandlerService/GetInboundUsers"
 
 # Protobuf type strings as expected by Xray's serial.TypedMessage.
 _TYPE_ADD_USER_OPERATION = "xray.app.proxyman.command.AddUserOperation"
@@ -169,7 +198,7 @@ _TYPE_VLESS_ACCOUNT = "xray.proxy.vless.Account"
 # ── Protobuf primitive codecs ────────────────────────────────────────────────
 #
 # We implement just enough of the protobuf wire format to encode the messages
-# below and decode ListInbounds responses. This is exhaustively covered by
+# below and decode GetInboundUsers responses. This is exhaustively covered by
 # unit tests in tests/test_xray_handler_api.py.
 
 
@@ -284,26 +313,30 @@ def _encode_alter_inbound_request(tag: str, operation_value: bytes, op_type: str
     return _field_string(1, tag) + _field_message(2, op_typed)
 
 
-def _encode_list_inbounds_request() -> bytes:
-    """app.proxyman.command.ListInboundsRequest is empty."""
-    return b""
+def _encode_get_inbound_users_request(tag: str, email: str = "") -> bytes:
+    """app.proxyman.command.GetInboundUserRequest { string tag=1; string email=2 }.
+
+    When ``email`` is empty the field is omitted entirely (proto3 default
+    behavior), and Xray returns every user registered under ``tag``. Passing
+    a non-empty ``email`` restricts the response to that single user — used
+    by callers that want a point lookup instead of a full snapshot.
+    """
+    out = _field_string(1, tag)
+    if email:
+        out += _field_string(2, email)
+    return out
 
 
-# ── ListInbounds response decoder ────────────────────────────────────────────
+# ── Message decoders ─────────────────────────────────────────────────────────
 #
-# The full response message is:
-#   ListInboundsResponse { repeated core.InboundHandlerConfig inbounds = 1 }
-#   InboundHandlerConfig { string tag=1; TypedMessage receiver_settings=2;
-#                          TypedMessage proxy_settings=3 }
-#   TypedMessage(proxy_settings) is xray.proxy.vless.inbound.Config:
-#       message Config { repeated User clients = 1; string decryption = 2;
-#                        repeated Fallback fallbacks = 3 }
+# The User message is shared across multiple call sites: AddUserOperation
+# uses it to encode a new client, and GetInboundUserResponse uses it to
+# describe each runtime client. The decoder helpers below walk the User
+# tree just deep enough to recover the (uuid, email) pair the rest of the
+# module needs.
+#
 #   User { uint32 level=1; string email=2; TypedMessage account=3 }
-#
-# Our list_users() only needs the per-user device_uuid, which lives inside
-# the vless.Account inside the TypedMessage inside each User. The decoder
-# walks the tree just deep enough to collect each Account.id (field 1) under
-# the matching inbound tag.
+#   TypedMessage(account) is xray.proxy.vless.Account { string id=1; ... }
 
 
 def _decode_vless_account_id(data: bytes) -> str:
@@ -400,79 +433,15 @@ def _decode_user_account_id(user_data: bytes) -> str:
     return _decode_user_uuid_and_email(user_data)[0]
 
 
-def _decode_vless_inbound_config_users(
-    config_data: bytes,
-) -> list[tuple[str, str]]:
-    """Extract (uuid, email) pairs from vless.inbound.Config.clients.
+def decode_get_inbound_users_response(data: bytes) -> dict[str, str]:
+    """Decode app.proxyman.command.GetInboundUserResponse → ``{uuid: email}``.
 
-    The clients field is ``repeated User clients = 1`` inside the vless
-    inbound config TypedMessage. Each User contributes one pair; entries
-    with a missing UUID (decoder failure) are dropped because there is
-    nothing useful a caller can do with them.
-    """
-    users: list[tuple[str, str]] = []
-    pos = 0
-    n = len(config_data)
-    while pos < n:
-        try:
-            tag, pos = _read_varint(config_data, pos)
-        except (IndexError, ValueError):
-            break
-        field_num = tag >> 3
-        wire_type = tag & 0x7
-        if field_num == 1 and wire_type == 2:
-            length, pos = _read_varint(config_data, pos)
-            user_bytes = config_data[pos : pos + length]
-            pos += length
-            uuid_value, email_value = _decode_user_uuid_and_email(user_bytes)
-            if uuid_value:
-                users.append((uuid_value, email_value))
-        else:
-            pos = _skip_field(config_data, pos, wire_type)
-    return users
-
-
-def _decode_inbound_handler_config(
-    data: bytes,
-) -> tuple[str, list[tuple[str, str]]]:
-    """Return ``(tag, [(uuid, email), ...])`` for one InboundHandlerConfig."""
-    tag_value = ""
-    users: list[tuple[str, str]] = []
-    pos = 0
-    n = len(data)
-    while pos < n:
-        try:
-            field_tag, pos = _read_varint(data, pos)
-        except (IndexError, ValueError):
-            break
-        field_num = field_tag >> 3
-        wire_type = field_tag & 0x7
-        if field_num == 1 and wire_type == 2:
-            length, pos = _read_varint(data, pos)
-            tag_value = data[pos : pos + length].decode("utf-8", errors="replace")
-            pos += length
-        elif field_num == 3 and wire_type == 2:
-            length, pos = _read_varint(data, pos)
-            typed_bytes = data[pos : pos + length]
-            pos += length
-            _proxy_type, proxy_value = _decode_typed_message(typed_bytes)
-            # The proxy_settings TypedMessage value is the wire-encoded
-            # vless.inbound.Config — decode its clients directly.
-            users = _decode_vless_inbound_config_users(proxy_value)
-        else:
-            pos = _skip_field(data, pos, wire_type)
-    return tag_value, users
-
-
-def decode_list_inbounds_response(
-    data: bytes, target_tag: str
-) -> dict[str, str]:
-    """Return ``{uuid: email}`` for every user registered under ``target_tag``.
-
-    The dict shape preserves the email field that Xray's RemoveUserOperation
-    requires. If two users in different inbounds happen to share a UUID,
-    the entry for ``target_tag`` wins because only that inbound's users
-    are merged in.
+    The response is a flat ``repeated User users = 1`` — no inbound wrapper,
+    no vless.inbound.Config wrapper. Xray has already filtered by the tag
+    we sent in the request, so the response is exactly the live user list
+    for that inbound. Each User decodes the same way as in AddUser's User:
+    ``User { uint32 level=1; string email=2; TypedMessage account=3 }``
+    where the TypedMessage payload is ``vless.Account { string id=1; ... }``.
     """
     out: dict[str, str] = {}
     pos = 0
@@ -486,12 +455,11 @@ def decode_list_inbounds_response(
         wire_type = field_tag & 0x7
         if field_num == 1 and wire_type == 2:
             length, pos = _read_varint(data, pos)
-            inbound_bytes = data[pos : pos + length]
+            user_bytes = data[pos : pos + length]
             pos += length
-            tag_value, users = _decode_inbound_handler_config(inbound_bytes)
-            if tag_value == target_tag:
-                for uuid_value, email_value in users:
-                    out[uuid_value] = email_value
+            uuid_value, email_value = _decode_user_uuid_and_email(user_bytes)
+            if uuid_value:
+                out[uuid_value] = email_value
         else:
             pos = _skip_field(data, pos, wire_type)
     return out
@@ -783,8 +751,8 @@ def list_users(
 
     response_bytes = _grpc_call(
         addr,
-        _GRPC_LIST_INBOUNDS,
-        _encode_list_inbounds_request(),
+        _GRPC_GET_INBOUND_USERS,
+        _encode_get_inbound_users_request(tag=inbound_tag),
         timeout,
     )
-    return decode_list_inbounds_response(response_bytes, inbound_tag)
+    return decode_get_inbound_users_response(response_bytes)

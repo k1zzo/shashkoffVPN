@@ -148,6 +148,10 @@ def run_reconciler_once(settings: "Settings") -> dict:
     result["desired"] = len(desired)
 
     try:
+        # ``live`` is sourced from HandlerService/GetInboundUsers — Xray's
+        # runtime user list — NOT ListInbounds (which returns only config).
+        # Before this distinction was understood, the reconciler reported a
+        # false ``+1 -0`` drift on every tick because live was always empty.
         live = list_users(addr=addr, inbound_tag=tag, timeout=timeout)
     except XrayApiUnavailable as exc:
         logger.info(
